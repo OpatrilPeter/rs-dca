@@ -133,14 +133,15 @@ fn ok_fname(name: &OsStr) -> Option<&str> {
     utf_name
 }
 
-// TODO: Iterator<&Path> is optimal type for files but Vec isn't covariant
-fn compress_files(files: &[PathBuf], archive_name: &Path) -> Result<(), io::Error> {
+fn compress_files<P>(files: impl IntoIterator<Item=P>, archive_name: &Path) -> Result<(), io::Error>
+    where P: AsRef<Path>,
+{
     let arch = File::create(archive_name)?; // TODO: Remove file on error
     let mut writer = io::BufWriter::new(arch);
 
     writer.write_all(b"DCA\n")?;
     for file in files {
-        let file = file.canonicalize()?;
+        let file = file.as_ref().canonicalize()?;
 
         let fname: &str = match file.file_name() {
             None => {
