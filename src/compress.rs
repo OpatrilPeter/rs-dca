@@ -1,19 +1,19 @@
-use log::error;
 use std::fs::{self, File};
 use std::io::{self, prelude::*};
 use std::path::Path;
 
-use crate::error::{dca_filename, ArchiveError, Handler};
+use crate::error::{dca_filename, error, ArchiveError, Handler};
 
 // Implemented by using standard logging
+#[cfg(feature = "logging")]
 struct DefaultHandler<'a> {
     archive_name: &'a Path,
 }
+#[cfg(feature = "logging")]
 impl<'a> DefaultHandler<'a> {
     fn new(archive_name: &'a Path) -> Self {
         Self { archive_name }
     }
-
     fn on_fatal(&self, err: &ArchiveError) {
         use ArchiveError::*;
         match err {
@@ -39,6 +39,16 @@ impl<'a> DefaultHandler<'a> {
             ),
         }
     }
+
+}
+#[cfg(not(feature = "logging"))]
+struct DefaultHandler<'a> {
+    _dummy: std::marker::PhantomData<&'a ()>,
+}
+#[cfg(not(feature = "logging"))]
+impl<'a> DefaultHandler<'a> {
+    fn new(_name: &Path) -> Self {Self{_dummy: std::marker::PhantomData}}
+    fn on_fatal(&self, _err: &ArchiveError) {}
 }
 
 impl<'a> Handler for DefaultHandler<'a> {

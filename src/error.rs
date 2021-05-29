@@ -2,6 +2,17 @@ use std::ffi::OsStr;
 use std::io;
 use std::path::PathBuf;
 
+#[cfg(feature = "logging")]
+pub use log::error;
+#[cfg(not(feature = "logging"))]
+macro_rules! error {
+    ($($any:tt)*) => {
+        eprintln!($($any)*);
+    }
+}
+#[cfg(not(feature = "logging"))]
+pub(crate) use error;
+
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ArchiveError {

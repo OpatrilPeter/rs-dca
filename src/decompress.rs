@@ -1,4 +1,3 @@
-use log::error;
 use std::cmp::min;
 use std::convert::TryInto;
 use std::fs::{self, File};
@@ -6,7 +5,7 @@ use std::io::{self, prelude::*, BufRead, Seek};
 use std::iter::FromIterator;
 use std::path::{Path, PathBuf};
 
-use crate::error::{ArchiveError, DecompressionError, Handler};
+use crate::error::{error, ArchiveError, DecompressionError, Handler};
 
 struct DefaultHandler<'a> {
     archive_name: &'a Path,
@@ -50,7 +49,7 @@ impl<'a> Handler for DefaultHandler<'a> {
                     "Extraction of file {:?} failed due to following error {}, skipping.",
                     fname, io_err
                 );
-                return Ok(());
+                Ok(())
             }
             // Other problems are fatal
             err => Err(err),
@@ -70,7 +69,7 @@ fn read_matches<const N: usize>(
     if res {
         *position += N;
     }
-    return Ok(res);
+    Ok(res)
 }
 
 fn read_line<T>(

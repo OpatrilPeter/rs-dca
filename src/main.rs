@@ -129,7 +129,7 @@ fn main() {
             archive_name: Some(archive_name),
             ..
         } => {
-            if let Err(_) = compress_files(&files, &archive_name) {
+            if compress_files(&files, &archive_name).is_err() {
                 eprintln!(
                     "Compression failed.\nArchive filename: {:?}\nArchive contents: {:?}",
                     archive_name, files
@@ -143,7 +143,7 @@ fn main() {
             work_directory: Some(work_directory),
             ..
         } => {
-            if let Err(_) = decompress_files(&archive_name, &work_directory) {
+            if decompress_files(&archive_name, &work_directory).is_err() {
                 eprintln!("Decompression of archive {:?} failed.", archive_name);
                 exit(1);
             }
