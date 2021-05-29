@@ -1,5 +1,5 @@
 [package]
-name = "rs-dca"
+name = "dca"
 version = "0.1.0"
 authors = ["Peter Opatril <petr.opatril@firma.seznam.cz>"]
 edition = "2018"
