@@ -1,7 +1,7 @@
 #[allow(unused_imports)]
 use log::{debug, error, warn};
 use std::ffi::{OsStr, OsString};
-use std::path::{PathBuf};
+use std::path::PathBuf;
 use std::process::exit;
 
 use dca::*;

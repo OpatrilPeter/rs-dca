@@ -39,7 +39,6 @@ impl<'a> DefaultHandler<'a> {
             ),
         }
     }
-
 }
 #[cfg(not(feature = "logging"))]
 struct DefaultHandler<'a> {
@@ -47,7 +46,11 @@ struct DefaultHandler<'a> {
 }
 #[cfg(not(feature = "logging"))]
 impl<'a> DefaultHandler<'a> {
-    fn new(_name: &Path) -> Self {Self{_dummy: std::marker::PhantomData}}
+    fn new(_name: &Path) -> Self {
+        Self {
+            _dummy: std::marker::PhantomData,
+        }
+    }
     fn on_fatal(&self, _err: &ArchiveError) {}
 }
 
@@ -158,4 +161,130 @@ where
         }
         e
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use tempfile::NamedTempFile;
+    use crate::error::DcaFilenameError;
+
+    fn make_outfile(contents: &[u8]) -> (NamedTempFile, String, &[u8]) {
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(contents).unwrap();
+        let fname = f.path().file_name().unwrap().to_str().unwrap().to_owned();
+        (f, fname, contents)
+    }
+
+    #[test]
+    fn test_empty() {
+        let mut out = Vec::<u8>::new();
+        let empty: &[&Path] = &[];
+        compress_into(&mut out, empty, &DefaultHandler::new(Path::new("no-file")))
+            .expect("Failed to compress file");
+
+        assert_eq!(out, b"DCA\n");
+    }
+
+    #[test]
+    fn test_single_file() {
+        let (file, fname, _) = make_outfile("Hello world!".as_bytes());
+
+        let mut out = Vec::<u8>::new();
+        compress_into(&mut out, &[file.path()], &DefaultHandler::new(file.path()))
+            .expect("Failed to compress file");
+
+        assert_eq!(
+            out,
+            [b"DCA\n", fname.as_bytes(), b"\n12\nHello world!\n"]
+                .concat()
+                .to_vec()
+        );
+    }
+
+    #[test]
+    fn test_many_files() {
+        let binary = make_outfile(b"\x00\xFF314\x10\x10");
+        let empty = make_outfile(b"");
+        let large = make_outfile(&[0xDEu8; 10 * 1024 * 1024]);
+        let text = make_outfile(b"dumb\ncat\narchive\n");
+
+        let mut out = Vec::<u8>::new();
+        compress_into(
+            &mut out,
+            &[
+                empty.0.path(),
+                large.0.path(),
+                binary.0.path(),
+                text.0.path(),
+            ],
+            &DefaultHandler::new(Path::new("large-archive.dca")),
+        )
+        .expect("Failed to compress file");
+
+        #[rustfmt::skip]
+        let contents = [b"DCA\n" as &[u8],
+            empty.1.as_bytes(), b"\n", empty.2.len().to_string().as_bytes(), b"\n", empty.2, b"\n",
+            large.1.as_bytes(), b"\n", large.2.len().to_string().as_bytes(), b"\n", large.2, b"\n",
+            binary.1.as_bytes(), b"\n", binary.2.len().to_string().as_bytes(), b"\n", binary.2, b"\n",
+            text.1.as_bytes(), b"\n", text.2.len().to_string().as_bytes(), b"\n", text.2, b"\n",
+        ].concat().to_vec();
+
+        assert_eq!(out, contents);
+    }
+
+    #[test]
+    fn test_errors() {
+        {
+            let mut out = Vec::<u8>::new();
+            let bad = compress_into(
+                &mut out,
+                // In current working dir at least
+                &[Path::new("./nonexisting")],
+                &DefaultHandler::new(Path::new("")),
+            ).unwrap_err();
+            match bad {
+                ArchiveError::BadFileIo(path, io_err) if path == Path::new("./nonexisting") => {
+                    assert!(io_err.kind() == io::ErrorKind::NotFound);
+                }
+                e => panic!("Unexpected error {:?}", e),
+            }
+        }
+        {
+            let mut out = Vec::<u8>::new();
+            let bad = compress_into(
+                &mut out,
+                // In current working dir at least
+                &[Path::new("\n\x01\x00")],
+                &DefaultHandler::new(Path::new("")),
+            ).unwrap_err();
+            match bad {
+                ArchiveError::InvalidDcaFilename(_, DcaFilenameError::InvalidChar('\n', 0))
+                    => (),
+                ArchiveError::BadFileIo(_, io_err) if io_err.kind() == io::ErrorKind::InvalidInput
+                    => (),
+                e => panic!("Unexpected error {:?}", e),
+            }
+        }
+    }
+
+    #[test]
+    fn test_handler() {
+        struct LaxHandler;
+        impl Handler for LaxHandler {
+            fn on_err(&self, err: ArchiveError) -> Result<(), ArchiveError> {
+                match err {
+                    ArchiveError::BadFileIo(path, io_err)
+                        if path == Path::new("./nonexistent") && io_err.kind() == io::ErrorKind::NotFound
+                        => Ok(()),
+                    e => panic!("Unexpected handleable error {:?}", e)
+                }
+            }
+        }
+        let file1 = make_outfile("file1".as_bytes());
+
+        let mut out = Vec::<u8>::new();
+        compress_into(&mut out, &[file1.0.path(), Path::new("./nonexistent")], &LaxHandler).unwrap();
+    }
 }

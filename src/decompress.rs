@@ -276,3 +276,138 @@ pub fn decompress_files(archive_name: &Path, work_directory: &Path) -> Result<()
         e
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::io::Cursor;
+    use std::ffi::OsStr;
+    use std::fs::read_dir;
+    use tempfile::TempDir;
+
+    fn make_dir() -> TempDir {
+        TempDir::new().unwrap()
+    }
+
+    fn check_file(dir: &Path, fname: &str, contents: &[u8]) {
+        let path: PathBuf = [dir, Path::new(fname)].iter().collect();
+        let mut buf = Vec::new();
+        // use std::io::Read;
+        File::open(path).unwrap().read_to_end(&mut buf).unwrap();
+        assert_eq!(buf, contents);
+    }
+
+    #[test]
+    fn test_empty() {
+        let dir = make_dir();
+
+        let mut contents = Cursor::new(b"DCA\n");
+        decompress_from(&mut contents, dir.path(), &DefaultHandler::new(Path::new(""))).unwrap();
+
+        assert_eq!(read_dir(dir.path()).unwrap().into_iter().count(), 0);
+    }
+
+    #[test]
+    fn test_single() {
+        let dir = make_dir();
+
+        let mut contents = Cursor::new(b"DCA\nhello\n5\nworld\n");
+        decompress_from(&mut contents, dir.path(), &DefaultHandler::new(Path::new(""))).unwrap();
+
+        check_file(dir.path(), "hello", b"world");
+
+        assert_eq!(read_dir(dir.path()).unwrap().into_iter().count(), 1);
+    }
+
+    #[test]
+    fn test_multiple() {
+        let dir = make_dir();
+
+        let mut contents = Cursor::new(b"DCA\nbinary\n6\n\x00\xFF\x80123\ntext\n6\n\ndca\n\n\nempty\n0\n\n");
+        decompress_from(&mut contents, dir.path(), &DefaultHandler::new(Path::new(""))).unwrap();
+
+        check_file(dir.path(), "binary", b"\x00\xFF\x80123");
+        check_file(dir.path(), "text", b"\ndca\n\n");
+        check_file(dir.path(), "empty", b"");
+
+        assert_eq!(read_dir(dir.path()).unwrap().into_iter().count(), 3);
+    }
+
+    #[test]
+    fn test_errors() {
+        let dir = make_dir();
+        let handler = &DefaultHandler::new(Path::new("bad"));
+
+        let mut contents = Cursor::new(b"");
+        let err = decompress_from(&mut contents, dir.path(), handler).unwrap_err();
+        match err {
+            ArchiveError::ArchiveIo(io_err) if io_err.kind() == io::ErrorKind::UnexpectedEof
+                => (),
+            e => panic!("Unexpected error type {:?}", e)
+        }
+
+        let mut contents = Cursor::new(b"DCAv2\nfoo\n3\nbar\n");
+        let err = decompress_from(&mut contents, dir.path(), handler).unwrap_err();
+        match err {
+            ArchiveError::CorruptedArchive{position, section: DecompressionError::Header}
+                => assert!((0..=4).contains(&position)),
+            e => panic!("Unexpected error type {:?}", e)
+        }
+
+        let mut contents = Cursor::new(b"DCA\nfoo\n1000\nbar");
+        let err = decompress_from(&mut contents, dir.path(), handler).unwrap_err();
+        match err {
+            ArchiveError::CorruptedArchive{position: 16, section: DecompressionError::Payload}
+                => (),
+            e => panic!("Unexpected error type {:?}", e)
+        }
+
+        let mut contents = Cursor::new(b"DCA\nfoo\n3\nbar");
+        let err = decompress_from(&mut contents, dir.path(), handler).unwrap_err();
+        match err {
+            ArchiveError::ArchiveIo(io_err) if io_err.kind() == io::ErrorKind::UnexpectedEof
+                => (),
+            e => panic!("Unexpected error type {:?}", e)
+        }
+    }
+
+    #[test]
+    fn test_handle() {
+        let dir = make_dir();
+        // Existence of subdirectory should force inability to create file of same name
+        let subdir = TempDir::new_in(dir.path()).unwrap();
+        let fname = subdir.path().file_name().unwrap().to_str().unwrap().to_owned();
+
+        struct LaxHandler;
+        impl Handler for LaxHandler {
+            fn on_err(&self, err: ArchiveError) -> Result<(), ArchiveError> {
+                if let ArchiveError::BadFileIo(_, _) = err {
+                    Ok(())
+                }
+                else {
+                    Err(err)
+                }
+            }
+        }
+
+        let mut contents = Cursor::new([b"DCA\nfoo\n3\n123\n", fname.as_bytes(), b"\n3\n456\n"].concat());
+        decompress_from(&mut contents, dir.path(), &LaxHandler).unwrap();
+
+        check_file(dir.path(), "foo", b"123");
+
+        assert_eq!(read_dir(dir.path()).unwrap().into_iter().count(), 2);
+        for entry in read_dir(dir.path()).unwrap() {
+            let entry = entry.unwrap();
+            match entry {
+                entry if entry.path().is_dir() => {
+                    assert_eq!(entry.path(), subdir.path());
+                },
+                entry if entry.path().is_file() => {
+                    assert_eq!(entry.path().file_name().unwrap(), OsStr::new("foo"));
+                }
+                e => panic!("Unexpected directory entry {:?}", e),
+            }
+        }
+    }
+}
