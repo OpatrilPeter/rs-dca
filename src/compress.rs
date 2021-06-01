@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::error::{dca_filename, error, handled, ArchiveError, Handler};
 
-/// Error Handler that fails on every condition, logging each encountered problem
+/// Error [`Handler`] that fails on every condition, logging each encountered problem
 struct DefaultHandler<'a> {
     archive_name: &'a Path,
 }

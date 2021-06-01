@@ -8,7 +8,7 @@ use std::io;
 use std::path::PathBuf;
 
 #[cfg(feature = "logging")]
-pub use log::error;
+pub(crate) use log::error;
 #[cfg(not(feature = "logging"))]
 macro_rules! error {
     ($($any:tt)*) => {

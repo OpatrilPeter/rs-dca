@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{error, handled, ArchiveError, DecompressionError, Handler};
 
-/// Error Handler that allows extraction failures, logging each encountered problem
+/// Error [`Handler`] that allows extraction failures, logging each encountered problem
 struct DefaultHandler<'a> {
     archive_name: &'a Path,
 }

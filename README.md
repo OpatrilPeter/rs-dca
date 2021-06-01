@@ -44,10 +44,6 @@ filesize: <decimal utf8 payload size in bytes>
 payload: <sequence of `filesize` bytes, original file content>
 ```
 
-## Notes
-
-My original Python implementation is available at src/dsa.py. Rust version is considerably more robust in error handling and performace and may be used either as library or as commandline executable.
-
 ## Command line usage
 
 For complete overview run `dca --help`, but following modes should work.
@@ -72,3 +68,9 @@ $ dca archive.dca -o output
 # Archive suffix can be implied (creates texts.dca)
 $ dca *.txt -o texts
 ```
+
+## Notes
+
+Aside from command line usage, you can also employ it as a library. There are no required runtine dependencies outside std library at this point, though usual logging facilities are used by default.
+
+My original Python implementation is available at src/dsa.py, though rust version is considerably more robust in error handling and performace.
