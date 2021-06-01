@@ -307,8 +307,8 @@ pub fn decompress_from(
 /// match decompress_files("archive.dca", "output") {
 ///     Ok(()) => println!("Archive extracted."),
 ///     Err(ArchiveError::CorruptedArchive{position, ..}) => println!("Archive corrupted at position {}!", position),
-///     Err(ArchiveError::ArchiveIo(_)) => println!("Archive corrupted!"),
-///     Err(_) => println!("Failed to extract file."),
+///     Err(ArchiveError::BadFileIo(path, _)) => println!("Couldn't extract {:?}.", path),
+///     Err(_) => println!("Failed to extract archive."),
 /// }
 /// ```
 pub fn decompress_files(archive_name: impl AsRef<Path>, work_directory: impl AsRef<Path>) -> Result<(), ArchiveError> {
