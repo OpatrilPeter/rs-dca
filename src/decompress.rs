@@ -2,10 +2,9 @@ use std::cmp::min;
 use std::convert::TryInto;
 use std::fs::{self, File};
 use std::io::{self, prelude::*, BufRead, Seek};
-use std::iter::FromIterator;
 use std::path::{Path, PathBuf};
 
-use crate::error::{error, ArchiveError, DecompressionError, Handler};
+use crate::error::{error, handled, ArchiveError, DecompressionError, Handler};
 
 struct DefaultHandler<'a> {
     archive_name: &'a Path,
@@ -114,35 +113,66 @@ fn read_file_size(
     })
 }
 
+struct ExtractFileError {
+    error: ArchiveError,
+    // If the problem is recoverable, contains bytes that weren't yet read
+    remaining: Option<usize>,
+}
+/// Conveniency implementation for all fatal conditions
+impl From<ArchiveError> for ExtractFileError {
+    fn from(err: ArchiveError) -> Self {
+        Self {
+            error: err,
+            remaining: None,
+        }
+    }
+}
+
 fn extract_file(
-    reader: &mut impl BufRead,
+    reader: &mut (impl BufRead + Seek),
     count: usize,
     sink: &mut impl Write,
     sink_name: &Path,
     position: &mut usize,
-) -> Result<(), ArchiveError> {
+) -> Result<(), ExtractFileError> {
+    use ArchiveError as E;
+
     let mut remaining_size = count;
     loop {
-        let buf = reader.fill_buf().map_err(ArchiveError::ArchiveIo)?;
+        let buf = reader.fill_buf().map_err(E::ArchiveIo)?;
         let read_upto = min(remaining_size, buf.len());
         if read_upto == 0 {
             if remaining_size > 0 {
-                return Err(ArchiveError::CorruptedArchive {
+                return Err(E::CorruptedArchive {
                     position: *position,
                     section: DecompressionError::Payload,
-                });
+                }
+                .into());
             }
             break;
         }
         sink.write_all(&buf[..read_upto])
-            .map_err(|e| ArchiveError::BadFileIo(sink_name.to_owned(), e))?;
+            .map_err(|e| ExtractFileError {
+                error: E::BadFileIo(sink_name.to_owned(), e),
+                remaining: Some(remaining_size),
+            })?;
         reader.consume(read_upto);
         *position += read_upto;
         remaining_size -= read_upto;
     }
+    // Footer
+    if !read_matches(reader, b"\n", position).map_err(E::ArchiveIo)? {
+        return Err(E::CorruptedArchive {
+            position: *position,
+            section: DecompressionError::Footer,
+        }
+        .into());
+    }
     Ok(())
 }
 
+/// Advances reading cursor to the end of given file in the archive, using
+/// `count` as expected (remaining) file size
 fn skip_file(
     reader: &mut (impl BufRead + Seek),
     count: usize,
@@ -160,22 +190,19 @@ fn skip_file(
         .map_err(ArchiveError::ArchiveIo)?;
     *position += count;
     // Footer
-    match read_matches(reader, b"\n", position) {
-        Ok(footer_matches) => {
-            if !footer_matches {
-                return Err(ArchiveError::CorruptedArchive {
-                    position: *position,
-                    section: DecompressionError::Footer,
-                });
-            }
-        }
-        Err(e) => {
-            return Err(ArchiveError::ArchiveIo(e));
-        }
+    if !read_matches(reader, b"\n", position).map_err(ArchiveError::ArchiveIo)? {
+        return Err(ArchiveError::CorruptedArchive {
+            position: *position,
+            section: DecompressionError::Footer,
+        });
     }
     Ok(())
 }
 
+/// Lower level decompression interface for DCA archives.
+///
+/// Compared to [`decompress_files`], allows detailed custom handling of various errors,
+/// see [`Handler`] and [`ArchiveError`] respectively for details.
 pub fn decompress_from(
     reader: &mut (impl BufRead + Seek),
     work_directory: &Path,
@@ -186,82 +213,88 @@ pub fn decompress_from(
     let mut position = 0usize;
 
     // Header
-    match read_matches(reader, b"DCA\n", &mut position) {
-        Ok(header_matches) => {
-            if !header_matches {
-                return Err(E::CorruptedArchive {
-                    position,
-                    section: DecompressionError::Header,
-                });
-            }
-        }
-        Err(e) => {
-            return Err(E::ArchiveIo(e));
-        }
+    if !read_matches(reader, b"DCA\n", &mut position).map_err(E::ArchiveIo)? {
+        return Err(E::CorruptedArchive {
+            position,
+            section: DecompressionError::Header,
+        });
     }
 
     let mut line_buf = String::new();
     loop {
         let fname: String =
             match read_line(reader, &mut line_buf, &mut position, |s| Ok(s.to_owned()))? {
-                None => {
-                    // Final file
-                    break;
-                }
+                // Final file
+                None => break,
                 Some(fname) => fname,
             };
 
         let fsize = read_file_size(reader, &mut line_buf, &mut position)?;
 
-        let fname_buf = PathBuf::from_iter(&[work_directory, Path::new(&fname)]);
-        let file = match File::create(&fname_buf).map_err(|e| E::BadFileIo(fname_buf.clone(), e)) {
-            Ok(file) => file,
-            Err(err) => {
-                handle.on_err(err)?;
-                // Handler decided that we can skip creation of this file, skip forward to the end
+        let fname_buf: PathBuf = [work_directory, Path::new(&fname)].iter().collect();
+        let file = handled!(
+            try { File::create(&fname_buf) }
+            else if handle(|e| E::BadFileIo(fname_buf.clone(), e)) {
                 skip_file(reader, fsize, &mut position)?;
                 continue;
             }
-        };
-        enum FileExportResult {
-            Done,
-            Remove(ArchiveError),
-        }
-        use FileExportResult::*;
-        let write_single_file = || -> FileExportResult {
+        );
+        let write_single_file = || {
             let mut writer = io::BufWriter::new(file);
 
-            match extract_file(reader, fsize, &mut writer, &fname_buf, &mut position) {
-                Ok(()) => Done,
-                Err(e) => Remove(e),
-            }
+            extract_file(reader, fsize, &mut writer, &fname_buf, &mut position)
         };
-        if let Remove(err) = write_single_file() {
-            if let Err(del_err) = fs::remove_file(&fname_buf) {
-                error!("Extraction of {:?} failed but the temporary file couldn't be deleted due to error {}. Please remove it manually.", fname_buf, del_err);
-            }
-            return Err(err);
-        }
-        // Footer
-        match read_matches(reader, b"\n", &mut position) {
-            Ok(footer_matches) => {
-                if !footer_matches {
-                    return Err(E::CorruptedArchive {
-                        position,
-                        section: DecompressionError::Footer,
-                    });
+        handled!(
+            try {
+                match write_single_file() {
+                    Ok(()) => Ok(()),
+                    Err(err) => {
+                        if let Err(del_err) = fs::remove_file(&fname_buf) {
+                            error!("Extraction of {:?} failed, but the temporary file couldn't be deleted due to error {}. Please remove it manually.", fname_buf, del_err);
+                        }
+                        if let Some(size) = err.remaining {
+                            skip_file(reader, size, &mut position)?;
+                            Err(err.error)
+                        }
+                        else {
+                            return Err(err.error);
+                        }
+                    }
                 }
             }
-            Err(e) => {
-                return Err(E::ArchiveIo(e));
-            }
-        }
+            else if handle {}
+        )
     }
 
     Ok(())
 }
 
-pub fn decompress_files(archive_name: &Path, work_directory: &Path) -> Result<(), ArchiveError> {
+/// Decompresses DCA archive `archive_name` into `work_directory`.
+///
+/// Has simple high-level interface that skips and logs out files that fail to extract - (see [`decompress_from`]
+/// if more control over process is desired.
+///
+/// On failure during extraction, already extracted files are kept while files in the middle of extraction
+/// get deleted.
+///
+/// # Examples
+///
+/// ```no_run
+/// decompress_files("subdir/archive.dca", "outputdir")
+///     .expect("decompression failed");
+/// ```
+/// ```no_run
+/// match decompress_files("archive.dca", "output") {
+///     Ok(()) => println!("Archive extracted."),
+///     Err(ArchiveError::CorruptedArchive{position, ..}) => println!("Archive corrupted at position {}!", position),
+///     Err(ArchiveError::ArchiveIo(_)) => println!("Archive corrupted!"),
+///     Err(_) +> println!("Failed to extract file."),
+/// }
+/// ```
+pub fn decompress_files(archive_name: impl AsRef<Path>, work_directory: impl AsRef<Path>) -> Result<(), ArchiveError> {
+    let archive_name = archive_name.as_ref();
+    let work_directory = work_directory.as_ref();
+
     let handler = DefaultHandler::new(archive_name);
 
     let arch = File::open(archive_name).map_err(|e| {
@@ -281,9 +314,8 @@ pub fn decompress_files(archive_name: &Path, work_directory: &Path) -> Result<()
 mod tests {
     use super::*;
 
-    use std::io::Cursor;
-    use std::ffi::OsStr;
     use std::fs::read_dir;
+    use std::io::Cursor;
     use tempfile::TempDir;
 
     fn make_dir() -> TempDir {
@@ -303,7 +335,12 @@ mod tests {
         let dir = make_dir();
 
         let mut contents = Cursor::new(b"DCA\n");
-        decompress_from(&mut contents, dir.path(), &DefaultHandler::new(Path::new(""))).unwrap();
+        decompress_from(
+            &mut contents,
+            dir.path(),
+            &DefaultHandler::new(Path::new("")),
+        )
+        .unwrap();
 
         assert_eq!(read_dir(dir.path()).unwrap().into_iter().count(), 0);
     }
@@ -313,7 +350,12 @@ mod tests {
         let dir = make_dir();
 
         let mut contents = Cursor::new(b"DCA\nhello\n5\nworld\n");
-        decompress_from(&mut contents, dir.path(), &DefaultHandler::new(Path::new(""))).unwrap();
+        decompress_from(
+            &mut contents,
+            dir.path(),
+            &DefaultHandler::new(Path::new("")),
+        )
+        .unwrap();
 
         check_file(dir.path(), "hello", b"world");
 
@@ -324,8 +366,14 @@ mod tests {
     fn test_multiple() {
         let dir = make_dir();
 
-        let mut contents = Cursor::new(b"DCA\nbinary\n6\n\x00\xFF\x80123\ntext\n6\n\ndca\n\n\nempty\n0\n\n");
-        decompress_from(&mut contents, dir.path(), &DefaultHandler::new(Path::new(""))).unwrap();
+        let mut contents =
+            Cursor::new(b"DCA\nbinary\n6\n\x00\xFF\x80123\ntext\n6\n\ndca\n\n\nempty\n0\n\n");
+        decompress_from(
+            &mut contents,
+            dir.path(),
+            &DefaultHandler::new(Path::new("")),
+        )
+        .unwrap();
 
         check_file(dir.path(), "binary", b"\x00\xFF\x80123");
         check_file(dir.path(), "text", b"\ndca\n\n");
@@ -342,33 +390,35 @@ mod tests {
         let mut contents = Cursor::new(b"");
         let err = decompress_from(&mut contents, dir.path(), handler).unwrap_err();
         match err {
-            ArchiveError::ArchiveIo(io_err) if io_err.kind() == io::ErrorKind::UnexpectedEof
-                => (),
-            e => panic!("Unexpected error type {:?}", e)
+            ArchiveError::ArchiveIo(io_err) if io_err.kind() == io::ErrorKind::UnexpectedEof => (),
+            e => panic!("Unexpected error type {:?}", e),
         }
 
         let mut contents = Cursor::new(b"DCAv2\nfoo\n3\nbar\n");
         let err = decompress_from(&mut contents, dir.path(), handler).unwrap_err();
         match err {
-            ArchiveError::CorruptedArchive{position, section: DecompressionError::Header}
-                => assert!((0..=4).contains(&position)),
-            e => panic!("Unexpected error type {:?}", e)
+            ArchiveError::CorruptedArchive {
+                position,
+                section: DecompressionError::Header,
+            } => assert!((0..=4).contains(&position)),
+            e => panic!("Unexpected error type {:?}", e),
         }
 
         let mut contents = Cursor::new(b"DCA\nfoo\n1000\nbar");
         let err = decompress_from(&mut contents, dir.path(), handler).unwrap_err();
         match err {
-            ArchiveError::CorruptedArchive{position: 16, section: DecompressionError::Payload}
-                => (),
-            e => panic!("Unexpected error type {:?}", e)
+            ArchiveError::CorruptedArchive {
+                position: 16,
+                section: DecompressionError::Payload,
+            } => (),
+            e => panic!("Unexpected error type {:?}", e),
         }
 
         let mut contents = Cursor::new(b"DCA\nfoo\n3\nbar");
         let err = decompress_from(&mut contents, dir.path(), handler).unwrap_err();
         match err {
-            ArchiveError::ArchiveIo(io_err) if io_err.kind() == io::ErrorKind::UnexpectedEof
-                => (),
-            e => panic!("Unexpected error type {:?}", e)
+            ArchiveError::ArchiveIo(io_err) if io_err.kind() == io::ErrorKind::UnexpectedEof => (),
+            e => panic!("Unexpected error type {:?}", e),
         }
     }
 
@@ -377,34 +427,48 @@ mod tests {
         let dir = make_dir();
         // Existence of subdirectory should force inability to create file of same name
         let subdir = TempDir::new_in(dir.path()).unwrap();
-        let fname = subdir.path().file_name().unwrap().to_str().unwrap().to_owned();
+        let fname = subdir
+            .path()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
 
         struct LaxHandler;
         impl Handler for LaxHandler {
             fn on_err(&self, err: ArchiveError) -> Result<(), ArchiveError> {
                 if let ArchiveError::BadFileIo(_, _) = err {
                     Ok(())
-                }
-                else {
+                } else {
                     Err(err)
                 }
             }
         }
 
-        let mut contents = Cursor::new([b"DCA\nfoo\n3\n123\n", fname.as_bytes(), b"\n3\n456\n"].concat());
+        let mut contents = Cursor::new(
+            [
+                b"DCA\nfoo\n3\n123\n",
+                fname.as_bytes(),
+                b"\n3\n456\nbar\n3\n789\n",
+            ]
+            .concat(),
+        );
         decompress_from(&mut contents, dir.path(), &LaxHandler).unwrap();
 
         check_file(dir.path(), "foo", b"123");
+        check_file(dir.path(), "bar", b"789");
 
-        assert_eq!(read_dir(dir.path()).unwrap().into_iter().count(), 2);
+        assert_eq!(read_dir(dir.path()).unwrap().into_iter().count(), 3);
         for entry in read_dir(dir.path()).unwrap() {
             let entry = entry.unwrap();
             match entry {
                 entry if entry.path().is_dir() => {
                     assert_eq!(entry.path(), subdir.path());
-                },
+                }
                 entry if entry.path().is_file() => {
-                    assert_eq!(entry.path().file_name().unwrap(), OsStr::new("foo"));
+                    assert!(["foo", "bar"]
+                        .contains(&entry.path().file_name().and_then(|x| x.to_str()).unwrap()));
                 }
                 e => panic!("Unexpected directory entry {:?}", e),
             }

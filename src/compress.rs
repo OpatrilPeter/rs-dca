@@ -1,15 +1,15 @@
+//! Handles extraction from DCA archives
+
 use std::fs::{self, File};
 use std::io::{self, prelude::*};
 use std::path::Path;
 
-use crate::error::{dca_filename, error, ArchiveError, Handler};
+use crate::error::{dca_filename, error, handled, ArchiveError, Handler};
 
-// Implemented by using standard logging
-#[cfg(feature = "logging")]
+/// Error Handler that fails on every condition, logging each encountered problem
 struct DefaultHandler<'a> {
     archive_name: &'a Path,
 }
-#[cfg(feature = "logging")]
 impl<'a> DefaultHandler<'a> {
     fn new(archive_name: &'a Path) -> Self {
         Self { archive_name }
@@ -40,19 +40,6 @@ impl<'a> DefaultHandler<'a> {
         }
     }
 }
-#[cfg(not(feature = "logging"))]
-struct DefaultHandler<'a> {
-    _dummy: std::marker::PhantomData<&'a ()>,
-}
-#[cfg(not(feature = "logging"))]
-impl<'a> DefaultHandler<'a> {
-    fn new(_name: &Path) -> Self {
-        Self {
-            _dummy: std::marker::PhantomData,
-        }
-    }
-    fn on_fatal(&self, _err: &ArchiveError) {}
-}
 
 impl<'a> Handler for DefaultHandler<'a> {
     fn on_err(&self, err: ArchiveError) -> Result<(), ArchiveError> {
@@ -74,24 +61,11 @@ where
 
     writer.write_all(b"DCA\n").map_err(E::ArchiveIo)?;
     for file in files {
-        // If expression is corect, returns it
-        // Otherwise, exits early if handler decides so
-        // Otherwise, executes code from failblock, allowing control flow change or alternative ok result
-        macro_rules! handleable {
-            ($e: expr, $map_err: expr, $fail_blk: block) => {
-                match $e.map_err($map_err) {
-                    Ok(ok) => ok,
-                    Err(err) => {
-                        handle.on_err(err)?;
-                        $fail_blk;
-                    }
-                }
-            };
-        }
-        let file_path = handleable!(
-            file.as_ref().canonicalize(),
-            |e| E::BadFileIo(file.as_ref().to_owned(), e),
-            { continue }
+        let file_path = handled!(
+            try { file.as_ref().canonicalize() }
+            else if handle(|e| E::BadFileIo(file.as_ref().to_owned(), e)) {
+                continue
+            }
         );
         let fname = match file_path.file_name() {
             None => {
@@ -100,17 +74,21 @@ where
                 continue;
             }
             Some(fname) => {
-                handleable!(
-                    dca_filename(fname),
-                    |e| E::InvalidDcaFilename(file_path.clone(), e),
-                    { continue }
+                handled!(
+                    try { dca_filename(fname) }
+                    else if handle(|e| E::InvalidDcaFilename(file_path.clone(), e)) {
+                        continue
+                    }
                 )
             }
         };
 
         macro_rules! file_io_err {
             ($e: expr) => {
-                handleable!($e, |e| E::BadFileIo(file_path.clone(), e), { continue })
+                handled!(
+                    try { $e }
+                    else if handle(|e| E::BadFileIo(file_path.clone(), e)) { continue }
+                )
             };
         }
         let subfile = file_io_err!(File::open(&file));
@@ -167,8 +145,8 @@ where
 mod tests {
     use super::*;
 
-    use tempfile::NamedTempFile;
     use crate::error::DcaFilenameError;
+    use tempfile::NamedTempFile;
 
     fn make_outfile(contents: &[u8]) -> (NamedTempFile, String, &[u8]) {
         let mut f = NamedTempFile::new().unwrap();
@@ -243,7 +221,8 @@ mod tests {
                 // In current working dir at least
                 &[Path::new("./nonexisting")],
                 &DefaultHandler::new(Path::new("")),
-            ).unwrap_err();
+            )
+            .unwrap_err();
             match bad {
                 ArchiveError::BadFileIo(path, io_err) if path == Path::new("./nonexisting") => {
                     assert!(io_err.kind() == io::ErrorKind::NotFound);
@@ -258,12 +237,12 @@ mod tests {
                 // In current working dir at least
                 &[Path::new("\n\x01\x00")],
                 &DefaultHandler::new(Path::new("")),
-            ).unwrap_err();
+            )
+            .unwrap_err();
             match bad {
-                ArchiveError::InvalidDcaFilename(_, DcaFilenameError::InvalidChar('\n', 0))
-                    => (),
-                ArchiveError::BadFileIo(_, io_err) if io_err.kind() == io::ErrorKind::InvalidInput
-                    => (),
+                ArchiveError::InvalidDcaFilename(_, DcaFilenameError::InvalidChar('\n', 0)) => (),
+                ArchiveError::BadFileIo(_, io_err)
+                    if io_err.kind() == io::ErrorKind::InvalidInput => (),
                 e => panic!("Unexpected error {:?}", e),
             }
         }
@@ -276,15 +255,23 @@ mod tests {
             fn on_err(&self, err: ArchiveError) -> Result<(), ArchiveError> {
                 match err {
                     ArchiveError::BadFileIo(path, io_err)
-                        if path == Path::new("./nonexistent") && io_err.kind() == io::ErrorKind::NotFound
-                        => Ok(()),
-                    e => panic!("Unexpected handleable error {:?}", e)
+                        if path == Path::new("./nonexistent")
+                            && io_err.kind() == io::ErrorKind::NotFound =>
+                    {
+                        Ok(())
+                    }
+                    e => panic!("Unexpected handleable error {:?}", e),
                 }
             }
         }
         let file1 = make_outfile("file1".as_bytes());
 
         let mut out = Vec::<u8>::new();
-        compress_into(&mut out, &[file1.0.path(), Path::new("./nonexistent")], &LaxHandler).unwrap();
+        compress_into(
+            &mut out,
+            &[file1.0.path(), Path::new("./nonexistent")],
+            &LaxHandler,
+        )
+        .unwrap();
     }
 }

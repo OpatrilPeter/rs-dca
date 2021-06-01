@@ -1,3 +1,6 @@
+// For macro item export
+#![allow(clippy::single_component_path_imports)]
+
 use std::ffi::OsStr;
 use std::io;
 use std::path::PathBuf;
@@ -34,6 +37,27 @@ pub trait Handler {
     fn on_err(&self, err: ArchiveError) -> Result<(), ArchiveError>;
 }
 
+/// Convenience control flow macro for [`Handler`] - situations where the operation
+/// may, but doesn't have to cause termination of the whole function
+///
+/// If expression succeeds, unwraps it
+/// Otherwise, exits early if handler decides so
+/// Otherwise, executes code from failblock, allowing control flow change or alternative ok result
+macro_rules! handled {
+    (try {$e:expr} else if $handle:ident($map_err:expr) $fail_blk:block) => {
+        match $e.map_err($map_err) {
+            Ok(ok) => ok,
+            Err(err) => {
+                $handle.on_err(err)?;
+                $fail_blk;
+            }
+        }
+    };
+    (try {$e:expr} else if $handle:ident $fail_blk:block) => {
+        handled!(try {$e} else if $handle(|e|e) $fail_blk)
+    };
+}
+pub(crate) use handled;
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum DcaFilenameError {
