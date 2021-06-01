@@ -1,4 +1,4 @@
-//! Handles extraction from DCA archives
+//! Handles creation of DCA archives
 
 use std::fs::{self, File};
 use std::io::{self, prelude::*};
@@ -48,6 +48,13 @@ impl<'a> Handler for DefaultHandler<'a> {
     }
 }
 
+/// Lower level DCA compression interface.
+///
+/// Takes interable of file paths and writes archive contents into provided output.
+/// Nonfatal error states are passed into [Handler] that may decide to transform them,
+/// abort the compression or ignore them.
+///
+/// Also see [compress_files] for more hands-off interface.
 pub fn compress_into<PathIter, PathIterItem>(
     writer: &mut impl Write,
     files: PathIter,
@@ -116,14 +123,36 @@ where
     Ok(())
 }
 
+/// Compresses list of files into new DCA archive.
+///
+/// The new archive will be created at `archive_name` path,
+/// (_not_ creating nonexisting directories).
+/// Accepts list of paths to individual files, but as DCA format
+/// is flat, no directories are permitted. Multiple files with same name
+/// can be technically stored in the archive, but there's no additional
+/// metadata to disambiguate them.
+///
+/// May fail for various I/O reasons, see [ArchiveError] for details. Fails on first error (returned as [ArchiveError]) - if
+/// you're interested in more tuneable compression, see [compress_into].
+///
+/// # Example
+///
+/// ```no_run
+/// use dca::compress_files;
+///
+/// compress_files(&["text.txt", "src.rs", "binary.blob"], "archive.dca")
+///     .expect("failed to create the archive");
+/// ```
 pub fn compress_files<PathIter, PathIterItem>(
     files: PathIter,
-    archive_name: &Path,
+    archive_name: impl AsRef<Path>,
 ) -> Result<(), ArchiveError>
 where
     PathIter: IntoIterator<Item = PathIterItem>,
     PathIterItem: AsRef<Path>,
 {
+    let archive_name = archive_name.as_ref();
+
     let handler = DefaultHandler::new(archive_name);
 
     let arch = File::create(archive_name).map_err(|e| {

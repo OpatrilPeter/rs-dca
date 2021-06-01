@@ -47,6 +47,7 @@ struct Options {
     files: Vec<PathBuf>,
 }
 
+/// Deduces mode of operation and validates correct arguments for it
 fn select_mode(args: &clap::ArgMatches<'_>) -> Options {
     let mut opts = Options::default();
 

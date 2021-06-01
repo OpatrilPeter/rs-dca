@@ -1,3 +1,5 @@
+//! Handles extraction from DCA archives
+
 use std::cmp::min;
 use std::convert::TryInto;
 use std::fs::{self, File};
@@ -6,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{error, handled, ArchiveError, DecompressionError, Handler};
 
+/// Error Handler that allows extraction failures, logging each encountered problem
 struct DefaultHandler<'a> {
     archive_name: &'a Path,
 }
@@ -56,6 +59,7 @@ impl<'a> Handler for DefaultHandler<'a> {
     }
 }
 
+/// Returns true if read from the reader matches fixed byte sequence
 fn read_matches<const N: usize>(
     reader: &mut impl Read,
     reference: &'static [u8; N],
@@ -71,6 +75,10 @@ fn read_matches<const N: usize>(
     Ok(res)
 }
 
+/// Reads UTF-8 text from the archive up to the following newline (\n) character, and transforms
+/// the read string into appropriate result type via `processor` callback.
+///
+/// Also allows to read nothing, returning None in that case.
 fn read_line<T>(
     reader: &mut impl BufRead,
     line_buf: &mut String,
@@ -91,6 +99,7 @@ fn read_line<T>(
     res.map(Some)
 }
 
+/// Reads file size segment from the archive
 fn read_file_size(
     reader: &mut impl BufRead,
     line_buf: &mut String,
@@ -128,6 +137,12 @@ impl From<ArchiveError> for ExtractFileError {
     }
 }
 
+/// Read contents of the file from the archive into provided sink
+///
+/// `count` is number of bytes file should have
+///
+/// Note that if function fails to write into provided sink, remaining byte count
+/// is returned, allow skipping the rest of the file
 fn extract_file(
     reader: &mut (impl BufRead + Seek),
     count: usize,
@@ -280,15 +295,20 @@ pub fn decompress_from(
 /// # Examples
 ///
 /// ```no_run
+/// use dca::decompress_files;
+///
 /// decompress_files("subdir/archive.dca", "outputdir")
 ///     .expect("decompression failed");
 /// ```
 /// ```no_run
+/// use dca::decompress_files;
+/// use dca::error::ArchiveError;
+///
 /// match decompress_files("archive.dca", "output") {
 ///     Ok(()) => println!("Archive extracted."),
 ///     Err(ArchiveError::CorruptedArchive{position, ..}) => println!("Archive corrupted at position {}!", position),
 ///     Err(ArchiveError::ArchiveIo(_)) => println!("Archive corrupted!"),
-///     Err(_) +> println!("Failed to extract file."),
+///     Err(_) => println!("Failed to extract file."),
 /// }
 /// ```
 pub fn decompress_files(archive_name: impl AsRef<Path>, work_directory: impl AsRef<Path>) -> Result<(), ArchiveError> {

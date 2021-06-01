@@ -1,3 +1,5 @@
+//! Common error handling types and utilities
+
 // For macro item export
 #![allow(clippy::single_component_path_imports)]
 
@@ -58,10 +60,14 @@ macro_rules! handled {
     };
 }
 pub(crate) use handled;
+
+/// Errors concerning invalid filename for DCA entry
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum DcaFilenameError {
+    /// Name not valid UTF-8
     NotUnicode,
+    /// Unsupported character detected at certain position
     InvalidChar(char, usize),
 }
 
@@ -75,6 +81,7 @@ pub fn dca_filename(name: &OsStr) -> Result<&str, DcaFilenameError> {
     Ok(name)
 }
 
+/// Lists various sections of DCA file format where problems during extraction could occur
 #[derive(Debug)]
 pub enum DecompressionError {
     Header,
