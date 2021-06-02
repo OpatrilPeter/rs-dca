@@ -175,20 +175,12 @@ mod tests {
     use super::*;
 
     use crate::error::DcaFilenameError;
-    use tempfile::NamedTempFile;
-
-    fn make_outfile(contents: &[u8]) -> (NamedTempFile, String, &[u8]) {
-        let mut f = NamedTempFile::new().unwrap();
-        f.write_all(contents).unwrap();
-        let fname = f.path().file_name().unwrap().to_str().unwrap().to_owned();
-        (f, fname, contents)
-    }
+    use assert_fs::{prelude::*, TempDir};
 
     #[test]
     fn test_empty() {
         let mut out = Vec::<u8>::new();
-        let empty: &[&Path] = &[];
-        compress_into(&mut out, empty, &DefaultHandler::new(Path::new("no-file")))
+        compress_into(&mut out, &[] as &[&Path], &DefaultHandler::new(Path::new("no-file")))
             .expect("Failed to compress file");
 
         assert_eq!(out, b"DCA\n");
@@ -196,35 +188,36 @@ mod tests {
 
     #[test]
     fn test_single_file() {
-        let (file, fname, _) = make_outfile("Hello world!".as_bytes());
+        let dir = TempDir::new().unwrap();
+        dir.child("test").write_str("Hello world!").unwrap();
 
         let mut out = Vec::<u8>::new();
-        compress_into(&mut out, &[file.path()], &DefaultHandler::new(file.path()))
+        compress_into(&mut out, &[dir.child("test")], &DefaultHandler::new(Path::new("test.dca")))
             .expect("Failed to compress file");
 
         assert_eq!(
             out,
-            [b"DCA\n", fname.as_bytes(), b"\n12\nHello world!\n"]
-                .concat()
-                .to_vec()
+            b"DCA\ntest\n12\nHello world!\n"
         );
     }
 
     #[test]
     fn test_many_files() {
-        let binary = make_outfile(b"\x00\xFF314\x10\x10");
-        let empty = make_outfile(b"");
-        let large = make_outfile(&[0xDEu8; 10 * 1024 * 1024]);
-        let text = make_outfile(b"dumb\ncat\narchive\n");
+        let dir = TempDir::new().unwrap();
+
+        dir.child("binary").write_binary(b"\x00\xFF314\x10\x10").unwrap();
+        dir.child("empty").touch().unwrap();
+        dir.child("large").write_binary(&[0xDEu8; 10 * 1024 * 1024]).unwrap();
+        dir.child("text").write_str("dumb\ncat\narchive\n").unwrap();
 
         let mut out = Vec::<u8>::new();
         compress_into(
             &mut out,
             &[
-                empty.0.path(),
-                large.0.path(),
-                binary.0.path(),
-                text.0.path(),
+                dir.child("empty"),
+                dir.child("large"),
+                dir.child("binary"),
+                dir.child("text"),
             ],
             &DefaultHandler::new(Path::new("large-archive.dca")),
         )
@@ -232,10 +225,10 @@ mod tests {
 
         #[rustfmt::skip]
         let contents = [b"DCA\n" as &[u8],
-            empty.1.as_bytes(), b"\n", empty.2.len().to_string().as_bytes(), b"\n", empty.2, b"\n",
-            large.1.as_bytes(), b"\n", large.2.len().to_string().as_bytes(), b"\n", large.2, b"\n",
-            binary.1.as_bytes(), b"\n", binary.2.len().to_string().as_bytes(), b"\n", binary.2, b"\n",
-            text.1.as_bytes(), b"\n", text.2.len().to_string().as_bytes(), b"\n", text.2, b"\n",
+            b"empty\n0\n\n",
+            b"large\n", (10 * 1024 * 1024i32).to_string().as_bytes(), b"\n", &[0xDEu8; 10 * 1024 * 1024], b"\n",
+            b"binary\n7\n\x00\xFF314\x10\x10\n",
+            b"text\n17\ndumb\ncat\narchive\n\n",
         ].concat().to_vec();
 
         assert_eq!(out, contents);
@@ -293,14 +286,18 @@ mod tests {
                 }
             }
         }
-        let file1 = make_outfile("file1".as_bytes());
+
+        let dir = TempDir::new().unwrap();
+        dir.child("file").write_str("data").unwrap();
 
         let mut out = Vec::<u8>::new();
         compress_into(
             &mut out,
-            &[file1.0.path(), Path::new("./nonexistent")],
+            &[dir.child("file").path(), Path::new("./nonexistent")],
             &LaxHandler,
         )
         .unwrap();
+
+        assert_eq!(out, b"DCA\nfile\n4\ndata\n");
     }
 }

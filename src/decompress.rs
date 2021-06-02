@@ -336,18 +336,14 @@ mod tests {
 
     use std::fs::read_dir;
     use std::io::Cursor;
-    use tempfile::TempDir;
+    use assert_fs::{prelude::*, TempDir};
 
     fn make_dir() -> TempDir {
         TempDir::new().unwrap()
     }
 
-    fn check_file(dir: &Path, fname: &str, contents: &[u8]) {
-        let path: PathBuf = [dir, Path::new(fname)].iter().collect();
-        let mut buf = Vec::new();
-        // use std::io::Read;
-        File::open(path).unwrap().read_to_end(&mut buf).unwrap();
-        assert_eq!(buf, contents);
+    fn check_dir_size(dir: impl AsRef<Path>, size: usize) {
+        assert_eq!(read_dir(dir.as_ref()).unwrap().into_iter().count(), size);
     }
 
     #[test]
@@ -362,7 +358,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(read_dir(dir.path()).unwrap().into_iter().count(), 0);
+        check_dir_size(dir, 0);
     }
 
     #[test]
@@ -377,9 +373,8 @@ mod tests {
         )
         .unwrap();
 
-        check_file(dir.path(), "hello", b"world");
-
-        assert_eq!(read_dir(dir.path()).unwrap().into_iter().count(), 1);
+        check_dir_size(&dir, 1);
+        dir.child("hello").assert(b"world" as &[u8]);
     }
 
     #[test]
@@ -395,11 +390,10 @@ mod tests {
         )
         .unwrap();
 
-        check_file(dir.path(), "binary", b"\x00\xFF\x80123");
-        check_file(dir.path(), "text", b"\ndca\n\n");
-        check_file(dir.path(), "empty", b"");
-
-        assert_eq!(read_dir(dir.path()).unwrap().into_iter().count(), 3);
+        check_dir_size(&dir, 3);
+        dir.child("binary").assert(b"\x00\xFF\x80123" as &[u8]);
+        dir.child("text").assert(b"\ndca\n\n" as &[u8]);
+        dir.child("empty").assert(b"" as &[u8]);
     }
 
     #[test]
@@ -446,14 +440,7 @@ mod tests {
     fn test_handle() {
         let dir = make_dir();
         // Existence of subdirectory should force inability to create file of same name
-        let subdir = TempDir::new_in(dir.path()).unwrap();
-        let fname = subdir
-            .path()
-            .file_name()
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_owned();
+        dir.child("bad").create_dir_all().unwrap();
 
         struct LaxHandler;
         impl Handler for LaxHandler {
@@ -467,24 +454,22 @@ mod tests {
         }
 
         let mut contents = Cursor::new(
-            [
-                b"DCA\nfoo\n3\n123\n",
-                fname.as_bytes(),
-                b"\n3\n456\nbar\n3\n789\n",
-            ]
-            .concat(),
+            b"DCA\nfoo\n3\n123\n\
+            bad\n3\n456\n\
+            bar\n3\n789\n"
         );
         decompress_from(&mut contents, dir.path(), &LaxHandler).unwrap();
 
-        check_file(dir.path(), "foo", b"123");
-        check_file(dir.path(), "bar", b"789");
+        check_dir_size(&dir, 3);
+        dir.child("foo").assert("123");
+        dir.child("bad").assert(predicates::path::is_dir());
+        dir.child("bar").assert("789");
 
-        assert_eq!(read_dir(dir.path()).unwrap().into_iter().count(), 3);
         for entry in read_dir(dir.path()).unwrap() {
             let entry = entry.unwrap();
             match entry {
                 entry if entry.path().is_dir() => {
-                    assert_eq!(entry.path(), subdir.path());
+                    assert_eq!(entry.path(), dir.child("bad").path());
                 }
                 entry if entry.path().is_file() => {
                     assert!(["foo", "bar"]
