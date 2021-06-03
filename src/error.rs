@@ -1,22 +1,34 @@
 //! Common error handling types and utilities
 
 // For macro item export
-#![allow(clippy::single_component_path_imports)]
+// #![allow(clippy::single_component_path_imports)]
 
 use std::ffi::OsStr;
 use std::io;
 use std::path::PathBuf;
 
 #[cfg(feature = "logging")]
-pub(crate) use log::error;
+pub(crate) use log::{error, warn};
 #[cfg(not(feature = "logging"))]
-macro_rules! error {
-    ($($any:tt)*) => {
-        eprintln!($($any)*);
+mod log {
+    macro_rules! error {
+        ($($any:tt)*) => {
+            eprintln!($($any)*);
+        }
     }
+    macro_rules! warning {
+        ($($any:tt)*) => {
+            eprintln!($($any)*);
+        }
+    }
+    pub(crate) use {error, warning};
 }
 #[cfg(not(feature = "logging"))]
-pub(crate) use error;
+pub(crate) use log::{error, warning as warn};
+
+/// Represents size of DCA file entries and also byte position inside them
+/// Alias to the return type of [`std::io::Seek`] offset
+pub type FilePosition = u64;
 
 #[derive(Debug)]
 #[non_exhaustive]
@@ -25,11 +37,12 @@ pub enum ArchiveError {
     ArchiveIo(io::Error),
     /// When decompressing, structure violation was detected
     CorruptedArchive {
-        position: usize,
+        position: FilePosition,
         section: DecompressionError,
     },
     /// File within archive contents fails for I/O reasons - it can't be opened, read or written into
     BadFileIo(PathBuf, io::Error),
+    // BadFileIo(PathBuf, io::Error),
     /// Filename of archive contents doesn't conform to expected requirements
     InvalidDcaFilename(PathBuf, DcaFilenameError),
 }
@@ -45,6 +58,9 @@ pub trait Handler {
 /// If expression succeeds, unwraps it
 /// Otherwise, exits early if handler decides so
 /// Otherwise, executes code from failblock, allowing control flow change or alternative ok result
+///
+/// Note: currently unused, but left in for curious reader
+#[allow(unused_macros)]
 macro_rules! handled {
     (try {$e:expr} else if $handle:ident($map_err:expr) $fail_blk:block) => {
         match $e.map_err($map_err) {
@@ -59,7 +75,6 @@ macro_rules! handled {
         handled!(try {$e} else if $handle(|e|e) $fail_blk)
     };
 }
-pub(crate) use handled;
 
 /// Errors concerning invalid filename for DCA entry
 #[derive(Debug)]

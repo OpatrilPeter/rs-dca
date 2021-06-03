@@ -4,17 +4,17 @@ use std::fs::{self, File};
 use std::io::{self, prelude::*};
 use std::path::Path;
 
-use crate::error::{dca_filename, error, handled, ArchiveError, Handler};
+use crate::error::{dca_filename, error, ArchiveError, Handler as ErrorHandler};
 
 /// Error [`Handler`] that fails on every condition, logging each encountered problem
-struct DefaultHandler<'a> {
+pub struct DefaultErrorHandler<'a> {
     archive_name: &'a Path,
 }
-impl<'a> DefaultHandler<'a> {
-    fn new(archive_name: &'a Path) -> Self {
+impl<'a> DefaultErrorHandler<'a> {
+    pub fn new(archive_name: &'a Path) -> Self {
         Self { archive_name }
     }
-    fn on_fatal(&self, err: &ArchiveError) {
+    pub fn on_fatal(&self, err: &ArchiveError) {
         use ArchiveError::*;
         match err {
             ArchiveIo(io_err) => {
@@ -41,85 +41,156 @@ impl<'a> DefaultHandler<'a> {
     }
 }
 
-impl<'a> Handler for DefaultHandler<'a> {
+impl<'a> ErrorHandler for DefaultErrorHandler<'a> {
     fn on_err(&self, err: ArchiveError) -> Result<(), ArchiveError> {
         // All errors are fatal
         Err(err)
     }
 }
 
-/// Lower level DCA compression interface.
+pub struct FileDescriptor<'a, R: BufRead> {
+    pub path: &'a Path,
+    pub reader: R,
+    pub len: u64,
+}
+
+/// Allows full customization of [`compress_into`] input file handling.
+pub trait FileHandler {
+    type Reader: BufRead;
+    /// Event-driven Iterator-like protocol.
+    ///
+    /// Is called once for each file to be added with actual archive appending logic passed as `compress` callback.
+    /// Allows implementaion to open/close output files or do some appropriate equivalent.
+    ///
+    /// Various possible results:
+    ///
+    /// Ok(None) => No more file to add
+    /// Ok(Some(())) => File processed successfuly
+    /// Err(_) => [`ArchiveError`] - either from underlying callback or internally created [`io::Error`] promoted into [`ArchiveError::BadFileIo`]
+    fn add_file<Callback>(&mut self, compress: Callback) -> Result<Option<()>, ArchiveError>
+    where
+        Callback: FnOnce(FileDescriptor<'_, Self::Reader>) -> Result<(), ArchiveError>;
+}
+
+/// Handler for [`compress_into`], feeding it list of files.
+/// This class is responsible for opening and closing eachg
+pub struct DefaultFileHandler<I>
+// where
+//     I: Iterator,
+//     I::Item : AsRef<Path>
+{
+    /// Iterable of files (file paths)
+    files: I,
+}
+impl<I> DefaultFileHandler<I> {
+    pub fn new<II>(files: II) -> Self
+    where
+        II: IntoIterator<IntoIter = I>,
+        I: Iterator,
+        I::Item: AsRef<Path>,
+    {
+        Self {
+            files: files.into_iter(),
+        }
+    }
+}
+
+impl<I> FileHandler for DefaultFileHandler<I>
+where
+    I: Iterator,
+    I::Item: AsRef<Path>,
+{
+    type Reader = io::BufReader<fs::File>;
+    fn add_file<Callback>(&mut self, compress: Callback) -> Result<Option<()>, ArchiveError>
+    where
+        Callback: FnOnce(FileDescriptor<'_, Self::Reader>) -> Result<(), ArchiveError>,
+    {
+        use ArchiveError as E;
+
+        let file_path = match self.files.next() {
+            None => return Ok(None),
+            Some(f) => f,
+        };
+        let file_path = file_path.as_ref();
+        let bad_io = |e| E::BadFileIo(file_path.to_owned(), e);
+
+        let file = File::open(file_path).map_err(bad_io)?;
+        let mut reader = io::BufReader::new(file);
+        let file_len = reader.seek(io::SeekFrom::End(0)).map_err(bad_io)?;
+        reader.seek(io::SeekFrom::Start(0)).map_err(bad_io)?;
+
+        compress(FileDescriptor {
+            path: file_path,
+            reader,
+            len: file_len,
+        })?;
+        Ok(Some(()))
+    }
+}
+
+/// Lower level DCA archive construction interface.
 ///
-/// Takes interable of file paths and writes archive contents into provided output.
-/// Nonfatal error states are passed into [Handler] that may decide to transform them,
+/// The functionality is customizable by event handlers in following way:
+///
+/// Writes into standard Writer.
+///
+/// Instead of operating on filesystem directly, it relies on [`FileHandler`] to provide it
+/// with input file abstractions.
+///
+/// Nonfatal error states are passed into [`ErrorHandler`] that may decide to transform them,
 /// abort the compression or ignore them.
 ///
 /// Also see [compress_files] for more hands-off interface.
-pub fn compress_into<PathIter, PathIterItem>(
+pub fn compress_into(
     writer: &mut impl Write,
-    files: PathIter,
-    handle: &impl Handler,
-) -> Result<(), ArchiveError>
-where
-    PathIter: IntoIterator<Item = PathIterItem>,
-    PathIterItem: AsRef<Path>,
-{
+    handle_file: &mut impl FileHandler,
+    handle_err: &mut impl ErrorHandler,
+) -> Result<(), ArchiveError> {
     use ArchiveError as E;
 
     writer.write_all(b"DCA\n").map_err(E::ArchiveIo)?;
-    for file in files {
-        let file_path = handled!(
-            try { file.as_ref().canonicalize() }
-            else if handle(|e| E::BadFileIo(file.as_ref().to_owned(), e)) {
-                continue
-            }
-        );
-        let fname = match file_path.file_name() {
-            None => {
-                let io_err = io::Error::new(io::ErrorKind::InvalidInput, "input is not a filename");
-                handle.on_err(E::BadFileIo(file_path, io_err))?;
-                continue;
-            }
-            Some(fname) => {
-                handled!(
-                    try { dca_filename(fname) }
-                    else if handle(|e| E::InvalidDcaFilename(file_path.clone(), e)) {
-                        continue
-                    }
-                )
-            }
-        };
+    loop {
+        match handle_file.add_file(|file| {
+            let FileDescriptor {
+                mut reader,
+                path,
+                len,
+            } = file;
 
-        macro_rules! file_io_err {
-            ($e: expr) => {
-                handled!(
-                    try { $e }
-                    else if handle(|e| E::BadFileIo(file_path.clone(), e)) { continue }
-                )
-            };
+            // Validate filename
+            let fname = path.file_name().ok_or_else(|| {
+                E::BadFileIo(path.to_owned(), io::Error::from(io::ErrorKind::NotFound))
+            })?;
+
+            let name =
+                dca_filename(fname).map_err(|e| E::InvalidDcaFilename(path.to_owned(), e))?;
+
+            writer
+                .write_fmt(format_args!("{}\n{}\n", name, len))
+                .map_err(E::ArchiveIo)?;
+
+            loop {
+                let buf = reader
+                    .fill_buf()
+                    .map_err(|e| E::BadFileIo(path.to_owned(), e))?;
+                if buf.is_empty() {
+                    break;
+                }
+                let bytes = writer.write(buf).map_err(E::ArchiveIo)?;
+                reader.consume(bytes);
+            }
+            writer.write_all(b"\n").map_err(E::ArchiveIo)?;
+            Ok(())
+        }) {
+            Ok(None) => break,
+            Ok(Some(())) => (),
+            Err(err) => match &err {
+                // We can't comtinue compressing if we're in inconsistent state
+                E::ArchiveIo(_) => return Err(err),
+                _ => handle_err.on_err(err)?,
+            },
         }
-        let subfile = file_io_err!(File::open(&file));
-        let mut reader = io::BufReader::new(subfile);
-        let subfile_len = file_io_err!(reader.seek(io::SeekFrom::End(0)));
-        file_io_err!(reader.seek(io::SeekFrom::Start(0)));
-
-        writer
-            .write_fmt(format_args!("{}\n{}\n", fname, subfile_len))
-            .map_err(E::ArchiveIo)?;
-
-        loop {
-            let buf = reader
-                .fill_buf()
-                .map_err(|e| E::BadFileIo(file_path.clone(), e))?;
-            if buf.is_empty() {
-                break;
-            }
-            let bytes = writer.write(buf).map_err(E::ArchiveIo)?;
-            reader.consume(bytes);
-        }
-        writer.write_all(b"\n").map_err(E::ArchiveIo)?;
     }
-
     Ok(())
 }
 
@@ -132,8 +203,8 @@ where
 /// can be technically stored in the archive, but there's no additional
 /// metadata to disambiguate them.
 ///
-/// May fail for various I/O reasons, see [ArchiveError] for details. Fails on first error (returned as [ArchiveError]) - if
-/// you're interested in more tuneable compression, see [compress_into].
+/// May fail for various I/O reasons, see [`ArchiveError`] for details. Fails on first error - if
+/// you're interested in more tuneable compression, see [`compress_into`].
 ///
 /// # Example
 ///
@@ -143,26 +214,27 @@ where
 /// compress_files(&["text.txt", "src.rs", "binary.blob"], "archive.dca")
 ///     .expect("failed to create the archive");
 /// ```
-pub fn compress_files<PathIter, PathIterItem>(
+pub fn compress_files<PathIter>(
     files: PathIter,
     archive_name: impl AsRef<Path>,
 ) -> Result<(), ArchiveError>
 where
-    PathIter: IntoIterator<Item = PathIterItem>,
-    PathIterItem: AsRef<Path>,
+    PathIter: IntoIterator,
+    PathIter::Item: AsRef<Path>,
 {
     let archive_name = archive_name.as_ref();
 
-    let handler = DefaultHandler::new(archive_name);
+    let mut fhandler = DefaultFileHandler::new(files);
+    let mut ehandler = DefaultErrorHandler::new(archive_name);
 
     let arch = File::create(archive_name).map_err(|e| {
         let e = ArchiveError::ArchiveIo(e);
-        handler.on_fatal(&e);
+        ehandler.on_fatal(&e);
         e
     })?;
     let mut writer = io::BufWriter::new(arch);
-    compress_into(&mut writer, files, &handler).map_err(|e| {
-        handler.on_fatal(&e);
+    compress_into(&mut writer, &mut fhandler, &mut ehandler).map_err(|e| {
+        ehandler.on_fatal(&e);
         if let Err(io_err) = fs::remove_file(archive_name) {
             error!("Removal of incorrectly created archive {:?} failed with error {}, please remove it manually.", archive_name, io_err);
         }
@@ -170,7 +242,7 @@ where
     })
 }
 
-#[cfg(test)]
+/* #[cfg(test)]
 mod tests {
     use super::*;
 
@@ -180,7 +252,7 @@ mod tests {
     #[test]
     fn test_empty() {
         let mut out = Vec::<u8>::new();
-        compress_into(&mut out, &[] as &[&Path], &DefaultHandler::new(Path::new("no-file")))
+        compress_into(&mut out, &mut DefaultHandler::new(Path::new("no-file"), &[] as &[&Path]))
             .expect("Failed to compress file");
 
         assert_eq!(out, b"DCA\n");
@@ -270,10 +342,11 @@ mod tests {
         }
     }
 
+    // TODO: add `..` as filename
     #[test]
     fn test_handler() {
         struct LaxHandler;
-        impl Handler for LaxHandler {
+        impl ErrorHandler for LaxHandler {
             fn on_err(&self, err: ArchiveError) -> Result<(), ArchiveError> {
                 match err {
                     ArchiveError::BadFileIo(path, io_err)
@@ -300,4 +373,4 @@ mod tests {
 
         assert_eq!(out, b"DCA\nfile\n4\ndata\n");
     }
-}
+} */
