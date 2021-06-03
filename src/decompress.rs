@@ -259,11 +259,9 @@ pub fn decompress_from(
         }) {
             Ok(()) => (),
             Err(e) => match e {
-                E::BadFileIo(_, io_err) if io_err.kind() == io::ErrorKind::UnexpectedEof => {
+                E::ArchiveIo(io_err) if io_err.kind() == io::ErrorKind::UnexpectedEof => {
                     // Shouldn't fail
-                    let position = reader
-                        .seek(SeekFrom::End(0))
-                        .unwrap_or(FilePosition::MAX);
+                    let position = reader.seek(SeekFrom::End(0)).unwrap_or(FilePosition::MAX);
                     return Err(E::CorruptedArchive {
                         position,
                         section: DecompressionError::Payload,
@@ -348,13 +346,13 @@ pub fn decompress_files(
     })
 }
 
-/* #[cfg(test)]
+#[cfg(test)]
 mod tests {
     use super::*;
 
+    use assert_fs::{prelude::*, TempDir};
     use std::fs::read_dir;
     use std::io::Cursor;
-    use assert_fs::{prelude::*, TempDir};
 
     fn make_dir() -> TempDir {
         TempDir::new().unwrap()
@@ -364,6 +362,14 @@ mod tests {
         assert_eq!(read_dir(dir.as_ref()).unwrap().into_iter().count(), size);
     }
 
+    fn files(dir: &impl AsRef<Path>) -> DefaultFileHandler<'_> {
+        DefaultFileHandler::new(dir.as_ref())
+    }
+
+    fn std_errors() -> DefaultErrorHandler<'static> {
+        DefaultErrorHandler::new(Path::new("test-archive.dca"))
+    }
+
     #[test]
     fn test_empty() {
         let dir = make_dir();
@@ -371,8 +377,8 @@ mod tests {
         let mut contents = Cursor::new(b"DCA\n");
         decompress_from(
             &mut contents,
-            dir.path(),
-            &DefaultHandler::new(Path::new("")),
+            &mut files(&dir),
+            &DefaultErrorHandler::new(Path::new("")),
         )
         .unwrap();
 
@@ -384,12 +390,7 @@ mod tests {
         let dir = make_dir();
 
         let mut contents = Cursor::new(b"DCA\nhello\n5\nworld\n");
-        decompress_from(
-            &mut contents,
-            dir.path(),
-            &DefaultHandler::new(Path::new("")),
-        )
-        .unwrap();
+        decompress_from(&mut contents, &mut files(&dir), &std_errors()).unwrap();
 
         check_dir_size(&dir, 1);
         dir.child("hello").assert(b"world" as &[u8]);
@@ -401,12 +402,7 @@ mod tests {
 
         let mut contents =
             Cursor::new(b"DCA\nbinary\n6\n\x00\xFF\x80123\ntext\n6\n\ndca\n\n\nempty\n0\n\n");
-        decompress_from(
-            &mut contents,
-            dir.path(),
-            &DefaultHandler::new(Path::new("")),
-        )
-        .unwrap();
+        decompress_from(&mut contents, &mut files(&dir), &std_errors()).unwrap();
 
         check_dir_size(&dir, 3);
         dir.child("binary").assert(b"\x00\xFF\x80123" as &[u8]);
@@ -417,17 +413,17 @@ mod tests {
     #[test]
     fn test_errors() {
         let dir = make_dir();
-        let handler = &DefaultHandler::new(Path::new("bad"));
+        let handler = &DefaultErrorHandler::new(Path::new("bad"));
 
         let mut contents = Cursor::new(b"");
-        let err = decompress_from(&mut contents, dir.path(), handler).unwrap_err();
+        let err = decompress_from(&mut contents, &mut files(&dir), handler).unwrap_err();
         match err {
             ArchiveError::ArchiveIo(io_err) if io_err.kind() == io::ErrorKind::UnexpectedEof => (),
             e => panic!("Unexpected error type {:?}", e),
         }
 
         let mut contents = Cursor::new(b"DCAv2\nfoo\n3\nbar\n");
-        let err = decompress_from(&mut contents, dir.path(), handler).unwrap_err();
+        let err = decompress_from(&mut contents, &mut files(&dir), handler).unwrap_err();
         match err {
             ArchiveError::CorruptedArchive {
                 position,
@@ -437,7 +433,7 @@ mod tests {
         }
 
         let mut contents = Cursor::new(b"DCA\nfoo\n1000\nbar");
-        let err = decompress_from(&mut contents, dir.path(), handler).unwrap_err();
+        let err = decompress_from(&mut contents, &mut files(&dir), handler).unwrap_err();
         match err {
             ArchiveError::CorruptedArchive {
                 position: 16,
@@ -447,7 +443,7 @@ mod tests {
         }
 
         let mut contents = Cursor::new(b"DCA\nfoo\n3\nbar");
-        let err = decompress_from(&mut contents, dir.path(), handler).unwrap_err();
+        let err = decompress_from(&mut contents, &mut files(&dir), handler).unwrap_err();
         match err {
             ArchiveError::ArchiveIo(io_err) if io_err.kind() == io::ErrorKind::UnexpectedEof => (),
             e => panic!("Unexpected error type {:?}", e),
@@ -455,13 +451,13 @@ mod tests {
     }
 
     #[test]
-    fn test_handle() {
+    fn test_err_handler() {
         let dir = make_dir();
         // Existence of subdirectory should force inability to create file of same name
         dir.child("bad").create_dir_all().unwrap();
 
         struct LaxHandler;
-        impl Handler for LaxHandler {
+        impl ErrorHandler for LaxHandler {
             fn on_err(&self, err: ArchiveError) -> Result<(), ArchiveError> {
                 if let ArchiveError::BadFileIo(_, _) = err {
                     Ok(())
@@ -474,9 +470,9 @@ mod tests {
         let mut contents = Cursor::new(
             b"DCA\nfoo\n3\n123\n\
             bad\n3\n456\n\
-            bar\n3\n789\n"
+            bar\n3\n789\n",
         );
-        decompress_from(&mut contents, dir.path(), &LaxHandler).unwrap();
+        decompress_from(&mut contents, &mut files(&dir), &LaxHandler).unwrap();
 
         check_dir_size(&dir, 3);
         dir.child("foo").assert("123");
@@ -497,4 +493,38 @@ mod tests {
             }
         }
     }
-} */
+
+    #[test]
+    fn test_file_handler() {
+        #[derive(Default, Debug)]
+        struct VecFiles(Vec<(String, String)>);
+        impl FileHandler for VecFiles {
+            fn on_file<R: BufRead>(
+                &mut self,
+                file: FileDescriptor<'_, R>,
+            ) -> Result<(), ArchiveError> {
+                let mut buf = String::new();
+                file.reader.read_to_string(&mut buf).unwrap();
+                self.0.push((file.name.to_owned(), buf));
+                Ok(())
+            }
+        }
+
+        let mut contents = Cursor::new(
+            b"DCA\n\
+            first\n3\n123\n\
+            second\n5\nhello\n",
+        );
+        let mut files = VecFiles::default();
+        decompress_from(&mut contents, &mut files, &std_errors()).unwrap();
+
+        let results = [("first", "123"), ("second", "hello")].iter();
+        // Explicit check because of zip
+        assert!(files.0.len() == 2);
+        assert!(files
+            .0
+            .iter()
+            .zip(results)
+            .all(|((l1, l2), (r1, r2))| l1 == r1 && l2 == r2));
+    }
+}

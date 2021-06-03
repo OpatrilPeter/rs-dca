@@ -4,7 +4,7 @@ use std::fs::{self, File};
 use std::io::{self, prelude::*};
 use std::path::Path;
 
-use crate::error::{dca_filename, error, ArchiveError, Handler as ErrorHandler};
+use crate::error::{dca_filename, error, ArchiveError, FilePosition, Handler as ErrorHandler};
 
 /// Error [`Handler`] that fails on every condition, logging each encountered problem
 pub struct DefaultErrorHandler<'a> {
@@ -51,7 +51,7 @@ impl<'a> ErrorHandler for DefaultErrorHandler<'a> {
 pub struct FileDescriptor<'a, R: BufRead> {
     pub path: &'a Path,
     pub reader: R,
-    pub len: u64,
+    pub len: FilePosition,
 }
 
 /// Allows full customization of [`compress_into`] input file handling.
@@ -242,17 +242,26 @@ where
     })
 }
 
-/* #[cfg(test)]
+#[cfg(test)]
 mod tests {
     use super::*;
 
     use crate::error::DcaFilenameError;
     use assert_fs::{prelude::*, TempDir};
+    use std::ffi::OsStr;
+    use std::io::BufReader;
+
+    fn std_errors() -> DefaultErrorHandler<'static> {
+        DefaultErrorHandler::new(Path::new("test-archive.dca"))
+    }
+    fn files<P: AsRef<Path>>(slice: &[P]) -> DefaultFileHandler<impl Iterator<Item = &P>> {
+        DefaultFileHandler::new(slice)
+    }
 
     #[test]
     fn test_empty() {
         let mut out = Vec::<u8>::new();
-        compress_into(&mut out, &mut DefaultHandler::new(Path::new("no-file"), &[] as &[&Path]))
+        compress_into(&mut out, &mut files(&[] as &[&Path]), &mut std_errors())
             .expect("Failed to compress file");
 
         assert_eq!(out, b"DCA\n");
@@ -264,34 +273,39 @@ mod tests {
         dir.child("test").write_str("Hello world!").unwrap();
 
         let mut out = Vec::<u8>::new();
-        compress_into(&mut out, &[dir.child("test")], &DefaultHandler::new(Path::new("test.dca")))
-            .expect("Failed to compress file");
+        compress_into(
+            &mut out,
+            &mut files(&[dir.child("test")]),
+            &mut std_errors(),
+        )
+        .expect("Failed to compress file");
 
-        assert_eq!(
-            out,
-            b"DCA\ntest\n12\nHello world!\n"
-        );
+        assert_eq!(out, b"DCA\ntest\n12\nHello world!\n");
     }
 
     #[test]
     fn test_many_files() {
         let dir = TempDir::new().unwrap();
 
-        dir.child("binary").write_binary(b"\x00\xFF314\x10\x10").unwrap();
+        dir.child("binary")
+            .write_binary(b"\x00\xFF314\x10\x10")
+            .unwrap();
         dir.child("empty").touch().unwrap();
-        dir.child("large").write_binary(&[0xDEu8; 10 * 1024 * 1024]).unwrap();
+        dir.child("large")
+            .write_binary(&[0xDEu8; 10 * 1024 * 1024])
+            .unwrap();
         dir.child("text").write_str("dumb\ncat\narchive\n").unwrap();
 
         let mut out = Vec::<u8>::new();
         compress_into(
             &mut out,
-            &[
+            &mut files(&[
                 dir.child("empty"),
                 dir.child("large"),
                 dir.child("binary"),
                 dir.child("text"),
-            ],
-            &DefaultHandler::new(Path::new("large-archive.dca")),
+            ]),
+            &mut std_errors(),
         )
         .expect("Failed to compress file");
 
@@ -308,17 +322,19 @@ mod tests {
 
     #[test]
     fn test_errors() {
+        let dir = TempDir::new().unwrap();
         {
             let mut out = Vec::<u8>::new();
             let bad = compress_into(
                 &mut out,
-                // In current working dir at least
-                &[Path::new("./nonexisting")],
-                &DefaultHandler::new(Path::new("")),
+                &mut files(&[dir.child("nonexisting")]),
+                &mut std_errors(),
             )
             .unwrap_err();
             match bad {
-                ArchiveError::BadFileIo(path, io_err) if path == Path::new("./nonexisting") => {
+                ArchiveError::BadFileIo(path, io_err)
+                    if path == dir.child("nonexisting").path() =>
+                {
                     assert!(io_err.kind() == io::ErrorKind::NotFound);
                 }
                 e => panic!("Unexpected error {:?}", e),
@@ -328,29 +344,31 @@ mod tests {
             let mut out = Vec::<u8>::new();
             let bad = compress_into(
                 &mut out,
-                // In current working dir at least
-                &[Path::new("\n\x01\x00")],
-                &DefaultHandler::new(Path::new("")),
+                // This name should be invalid (regardless if file of such name can exist on filesystem)
+                &mut files(&[&Path::new("\n\x01\x00")]),
+                &mut std_errors(),
             )
             .unwrap_err();
             match bad {
                 ArchiveError::InvalidDcaFilename(_, DcaFilenameError::InvalidChar('\n', 0)) => (),
                 ArchiveError::BadFileIo(_, io_err)
-                    if io_err.kind() == io::ErrorKind::InvalidInput => (),
+                    if io_err.kind() == io::ErrorKind::InvalidInput =>
+                {
+                    ()
+                }
                 e => panic!("Unexpected error {:?}", e),
             }
         }
     }
 
-    // TODO: add `..` as filename
     #[test]
-    fn test_handler() {
-        struct LaxHandler;
-        impl ErrorHandler for LaxHandler {
+    fn test_err_handler() {
+        struct CustHandler;
+        impl ErrorHandler for CustHandler {
             fn on_err(&self, err: ArchiveError) -> Result<(), ArchiveError> {
                 match err {
                     ArchiveError::BadFileIo(path, io_err)
-                        if path == Path::new("./nonexistent")
+                        if path.file_name() == Some(OsStr::new("nonexistent"))
                             && io_err.kind() == io::ErrorKind::NotFound =>
                     {
                         Ok(())
@@ -366,11 +384,71 @@ mod tests {
         let mut out = Vec::<u8>::new();
         compress_into(
             &mut out,
-            &[dir.child("file").path(), Path::new("./nonexistent")],
-            &LaxHandler,
+            &mut files(&[dir.child("file"), dir.child("nonexistent")]),
+            &mut CustHandler,
         )
         .unwrap();
 
         assert_eq!(out, b"DCA\nfile\n4\ndata\n");
     }
-} */
+
+    #[test]
+    /// We pass directory names instead
+    fn test_invalid_name() {
+        let dir = TempDir::new().unwrap();
+
+        let mut out = Vec::<u8>::new();
+
+        let bad = compress_into(
+            &mut out,
+            &mut files(&[Path::new("/"), &dir.path().join("..")]),
+            &mut std_errors(),
+        )
+        .unwrap_err();
+        match bad {
+            ArchiveError::BadFileIo(path, io_err)
+                if path == Path::new("/") && io_err.kind() == io::ErrorKind::NotFound =>
+            {
+                ()
+            }
+            _ => panic!("Unexpected error {:?}", bad),
+        }
+    }
+
+    #[test]
+    fn test_file_handler() {
+        // For content just returns filenames
+
+        struct Handler<I>(I);
+        impl<'a, I: Iterator<Item = &'a &'static str>> FileHandler for Handler<I> {
+            type Reader = std::io::BufReader<&'a [u8]>;
+            fn add_file<Callback>(&mut self, compress: Callback) -> Result<Option<()>, ArchiveError>
+            where
+                Callback: FnOnce(FileDescriptor<'_, Self::Reader>) -> Result<(), ArchiveError>,
+            {
+                if let Some(s) = self.0.next() {
+                    let reader = BufReader::new(s.as_bytes());
+                    let fd = FileDescriptor {
+                        path: &Path::new(s),
+                        reader,
+                        len: s.len() as FilePosition,
+                    };
+                    compress(fd)?;
+                    Ok(Some(()))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+
+        let mut out = Vec::<u8>::new();
+        compress_into(
+            &mut out,
+            &mut Handler(["foo", "bar"].iter()),
+            &mut std_errors(),
+        )
+        .unwrap();
+
+        assert_eq!(out, b"DCA\nfoo\n3\nfoo\nbar\n3\nbar\n");
+    }
+}
