@@ -7,8 +7,10 @@ use std::path::PathBuf;
 use std::process::exit;
 
 use dca::*;
+
+// CLI specific logic
 mod listing;
-use listing::list_files;
+use listing::{list_files, ListingSort};
 
 fn parse_args() -> clap::ArgMatches<'static> {
     use clap::*;
@@ -25,6 +27,17 @@ fn parse_args() -> clap::ArgMatches<'static> {
                 .help("Lists archive's contents.")
         )
         .arg(
+            Arg::from_usage("--sort-by-name")
+                .help("Sort listing by name")
+                .requires("list")
+
+        )
+        .arg(
+            Arg::from_usage("--sort-by-size")
+                .help("Sort listing by name")
+                .requires("list")
+        )
+        .arg(
             Arg::from_usage("<files>...")
                 .help("If decompressing or listing, should be ONLY name of the archive. If compressing, should be list of files.")
         )
@@ -37,6 +50,11 @@ fn parse_args() -> clap::ArgMatches<'static> {
             ArgGroup::with_name("modes")
                 .multiple(false)
                 .args(&["compress", "decompress", "list"])
+        )
+        .group(
+            ArgGroup::with_name("sorting")
+                .multiple(false)
+                .args(&["sort-by-name", "sort-by-size"])
         )
         .get_matches()
 }
@@ -54,6 +72,7 @@ struct Options {
     work_directory: Option<PathBuf>,
     archive_name: Option<PathBuf>,
     files: Vec<PathBuf>,
+    sorting: ListingSort,
 }
 
 /// Deduces mode of operation and validates correct arguments for it
@@ -128,6 +147,12 @@ fn select_mode(args: &clap::ArgMatches<'_>) -> Options {
                 opts.mode = None;
                 return opts;
             }
+
+            if args.is_present("sort-by-name") {
+                opts.sorting = ListingSort::Name;
+            } else if args.is_present("sort-by-size") {
+                opts.sorting = ListingSort::Size;
+            }
             opts.archive_name = std::mem::take(&mut opts.files).into_iter().next();
         }
         None => (),
@@ -172,7 +197,7 @@ fn main() {
             archive_name: Some(archive_name),
             ..
         } => {
-            if list_files(&archive_name).is_err() {
+            if list_files(&archive_name, opts.sorting).is_err() {
                 eprintln!("Listing of archive {:?} failed.", archive_name);
                 exit(1);
             }
