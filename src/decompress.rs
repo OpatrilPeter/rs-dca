@@ -217,6 +217,31 @@ impl<'a> FileHandler for DefaultFileHandler<'a> {
     }
 }
 
+/// Simple [`FileHandler`] that doesn't extract the file, just delegates it to underlying callable
+pub struct CallbackFileHandler<C>(pub C)
+where
+    C: FnMut(&str, FilePosition, &mut dyn BufRead) -> Result<(), ArchiveError>;
+
+impl<C> FileHandler for CallbackFileHandler<C>
+where
+    C: FnMut(&str, FilePosition, &mut dyn BufRead) -> Result<(), ArchiveError>,
+{
+    fn on_file<R: BufRead>(&mut self, file: FileDescriptor<'_, R>) -> Result<(), ArchiveError> {
+        (self.0)(file.name, file.len, file.reader)
+    }
+}
+
+// Note: simpler wrapper-less version of CallbackFileHandler that compiler rejects on use
+// impl<C> FileHandler for C
+// where
+//     C: FnMut(&str, FilePosition, &mut dyn BufRead) -> Result<(), ArchiveError>,
+// {
+//     fn on_file<R: BufRead>(&mut self, file: FileDescriptor<'_, R>) -> Result<(), ArchiveError>
+//     {
+//         self(file.name, file.len, file.reader)
+//     }
+// }
+
 /// Lower level decompression interface for DCA archives.
 ///
 /// Instead of extracting files outright, it represents them as [`FileDescriptor`]

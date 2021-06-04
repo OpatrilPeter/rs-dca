@@ -1,3 +1,5 @@
+#![cfg(feature = "cli")]
+
 #[allow(unused_imports)]
 use log::{debug, error, warn};
 use std::ffi::{OsStr, OsString};
@@ -5,6 +7,8 @@ use std::path::PathBuf;
 use std::process::exit;
 
 use dca::*;
+mod listing;
+use listing::list_files;
 
 fn parse_args() -> clap::ArgMatches<'static> {
     use clap::*;
@@ -17,8 +21,12 @@ fn parse_args() -> clap::ArgMatches<'static> {
             Arg::from_usage("-d --decompress")
         )
         .arg(
+            Arg::from_usage("-l --list")
+                .help("Lists archive's contents.")
+        )
+        .arg(
             Arg::from_usage("<files>...")
-                .help("If decompressing, should be ONLY name of the archive. If compressing, should be list of files.")
+                .help("If decompressing or listing, should be ONLY name of the archive. If compressing, should be list of files.")
         )
         .arg(
             Arg::from_usage("-o --output")
@@ -28,7 +36,7 @@ fn parse_args() -> clap::ArgMatches<'static> {
         .group(
             ArgGroup::with_name("modes")
                 .multiple(false)
-                .args(&["compress", "decompress"])
+                .args(&["compress", "decompress", "list"])
         )
         .get_matches()
 }
@@ -37,6 +45,7 @@ fn parse_args() -> clap::ArgMatches<'static> {
 enum Mode {
     Compress,
     Decompress,
+    Listing,
 }
 
 #[derive(Default, Debug)]
@@ -63,6 +72,8 @@ fn select_mode(args: &clap::ArgMatches<'_>) -> Options {
         opts.mode = Some(Mode::Compress);
     } else if args.is_present("decompress") {
         opts.mode = Some(Mode::Decompress);
+    } else if args.is_present("list") {
+        opts.mode = Some(Mode::Listing);
     }
     // Auto detection
     else {
@@ -112,6 +123,13 @@ fn select_mode(args: &clap::ArgMatches<'_>) -> Options {
             opts.work_directory = output.or_else(|| Some(PathBuf::from(".")));
             opts.archive_name = std::mem::take(&mut opts.files).into_iter().next();
         }
+        Some(Mode::Listing) => {
+            if opts.files.len() != 1 || !output.is_none() {
+                opts.mode = None;
+                return opts;
+            }
+            opts.archive_name = std::mem::take(&mut opts.files).into_iter().next();
+        }
         None => (),
     }
     opts
@@ -146,6 +164,16 @@ fn main() {
         } => {
             if decompress_files(&archive_name, &work_directory).is_err() {
                 eprintln!("Decompression of archive {:?} failed.", archive_name);
+                exit(1);
+            }
+        }
+        Options {
+            mode: Some(Mode::Listing),
+            archive_name: Some(archive_name),
+            ..
+        } => {
+            if list_files(&archive_name).is_err() {
+                eprintln!("Listing of archive {:?} failed.", archive_name);
                 exit(1);
             }
         }
