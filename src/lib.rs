@@ -15,7 +15,9 @@
 
 pub mod compress;
 pub mod decompress;
+pub mod entries;
 pub mod error;
 
 pub use compress::compress_files;
 pub use decompress::decompress_files;
+pub use entries::archive_entries;

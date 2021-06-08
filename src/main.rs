@@ -7,10 +7,11 @@ use std::path::PathBuf;
 use std::process::exit;
 
 use dca::*;
+use entries::ListingSort;
 
 // CLI specific logic
 mod listing;
-use listing::{list_files, ListingSort};
+use listing::list_files;
 
 fn parse_args() -> clap::ArgMatches<'static> {
     use clap::*;
@@ -34,7 +35,7 @@ fn parse_args() -> clap::ArgMatches<'static> {
         )
         .arg(
             Arg::from_usage("--sort-by-size")
-                .help("Sort listing by name")
+                .help("Sort listing by file size")
                 .requires("list")
         )
         .arg(
@@ -143,7 +144,7 @@ fn select_mode(args: &clap::ArgMatches<'_>) -> Options {
             opts.archive_name = std::mem::take(&mut opts.files).into_iter().next();
         }
         Some(Mode::Listing) => {
-            if opts.files.len() != 1 || !output.is_none() {
+            if opts.files.len() != 1 || output.is_some() {
                 opts.mode = None;
                 return opts;
             }

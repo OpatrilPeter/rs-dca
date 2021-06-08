@@ -2,7 +2,7 @@
 
 ## Motivation
 
-Purpose of DCA format is creating minimalistic format for collecting multiple files into single one.
+The purpose of DCA format is creating minimalistic format for collecting multiple files into single one.
 Specifically, writing compressor or decompressor in any language and environment should be relatively simple.
 
 For example, original motivation arised when I had to download many small files from given website, but due
@@ -56,6 +56,9 @@ $ dca -c file1.txt file2.so -o archive.dca
 $ mkdir output
 # decompressing all files in archive into output directory
 $ dca -d archive.dca -o output
+
+# prints archive's contents
+$ dca -l archive.dca
 ```
 
 Many conveniencies work too, such as
@@ -71,6 +74,12 @@ $ dca *.txt -o texts
 
 ## Notes
 
-Aside from command line usage, you can also employ it as a library. There are no required runtine dependencies outside std library at this point, though usual logging facilities are used by default.
+Aside from command line usage, you can also employ it as a library. There are no required runtine dependencies outside std library at this point, though usual logging facilities are enabled by default.
 
-My original Python implementation is available at src/dsa.py, though rust version is considerably more robust in error handling and performace.
+My original Python implementation is available at src/dsa.py for comparison. Rust version is considerably more robust in error handling and performance.
+
+This project was made in a series of practical studies, evaluations and demonstrations of Rust usage, notably to observe if idiomatic Rust code offers sufficient practical advantage over typical highly performant (like C++) or very productive languages (like Python).
+
+You can judge for yourself, especially by looking at early commits, as they reflected much closely the reference Python script.
+
+Personally, it seemed to me that Rust actively encourages writing well structured and designed code - but if one can't spare the time and effort for finding optimal solutions to the (performance/safety/readability/productivity) design tradeoff, there are compelling alternatives.

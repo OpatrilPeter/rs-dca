@@ -1,26 +1,16 @@
-use humansize::{file_size_opts::CONVENTIONAL as FSIZE_STYLE, FileSize};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 
-use crate::decompress::{decompress_from, CallbackFileHandler, DefaultErrorHandler};
-use crate::error::{ArchiveError, FilePosition};
+use dca::decompress::DefaultErrorHandler;
+use dca::entries::{archive_entries, ListingSort};
+use dca::error::{ArchiveError, FilePosition};
+
+use humansize::{file_size_opts::CONVENTIONAL as FSIZE_STYLE, FileSize};
 
 fn fmt_file_size(pos: FilePosition) -> impl std::fmt::Display {
     // Should never be able to fail (library fails for unsigned numbers)
     pos.file_size(FSIZE_STYLE).unwrap()
-}
-
-#[derive(Debug)]
-pub enum ListingSort {
-    Unsorted,
-    Name,
-    Size,
-}
-impl Default for ListingSort {
-    fn default() -> Self {
-        ListingSort::Unsorted
-    }
 }
 
 pub fn list_files(
@@ -31,24 +21,9 @@ pub fn list_files(
 
     let arch = File::open(archive_name).map_err(ArchiveError::ArchiveIo)?;
     let mut reader = BufReader::new(arch);
-
-    let mut names = Vec::<(String, FilePosition)>::new();
-
     let ehandler = DefaultErrorHandler::new(archive_name);
-    let mut fhandler = CallbackFileHandler(|name, len, _reader| {
-        names.push((name.to_owned(), len));
-        Ok(())
-    });
 
-    decompress_from(&mut reader, &mut fhandler, &ehandler)?;
-
-    match sorting {
-        ListingSort::Name => names.sort_unstable_by(|(a, _), (b, _)| a.cmp(b)),
-        ListingSort::Size => names.sort_unstable_by(|(_, a), (_, b)| a.cmp(b).reverse()),
-        ListingSort::Unsorted => (),
-    }
-
-    for (name, size) in names {
+    for (name, size) in archive_entries(&mut reader, sorting, &ehandler)? {
         println!("{} ({})", name, fmt_file_size(size));
     }
     Ok(())
