@@ -18,6 +18,9 @@ pub mod decompress;
 pub mod entries;
 pub mod error;
 
+#[cfg(test)]
+mod testutils;
+
 pub use compress::compress_files;
 pub use decompress::decompress_files;
 pub use entries::archive_entries;

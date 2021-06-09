@@ -375,17 +375,12 @@ pub fn decompress_files(
 mod tests {
     use super::*;
 
-    use assert_fs::{prelude::*, TempDir};
+    use assert_fs::prelude::*;
+    use std::borrow::Borrow;
     use std::fs::read_dir;
     use std::io::Cursor;
 
-    fn make_dir() -> TempDir {
-        TempDir::new().unwrap()
-    }
-
-    fn check_dir_size(dir: impl AsRef<Path>, size: usize) {
-        assert_eq!(read_dir(dir.as_ref()).unwrap().into_iter().count(), size);
-    }
+    use crate::testutils::*;
 
     fn files(dir: &impl AsRef<Path>) -> DefaultFileHandler<'_> {
         DefaultFileHandler::new(dir.as_ref())
@@ -407,7 +402,7 @@ mod tests {
         )
         .unwrap();
 
-        check_dir_size(dir, 0);
+        assert_eq!(dir_size(&dir), 0);
     }
 
     #[test]
@@ -417,7 +412,7 @@ mod tests {
         let mut contents = Cursor::new(b"DCA\nhello\n5\nworld\n");
         decompress_from(&mut contents, &mut files(&dir), &std_errors()).unwrap();
 
-        check_dir_size(&dir, 1);
+        assert_eq!(dir_size(&dir), 1);
         dir.child("hello").assert(b"world" as &[u8]);
     }
 
@@ -429,7 +424,7 @@ mod tests {
             Cursor::new(b"DCA\nbinary\n6\n\x00\xFF\x80123\ntext\n6\n\ndca\n\n\nempty\n0\n\n");
         decompress_from(&mut contents, &mut files(&dir), &std_errors()).unwrap();
 
-        check_dir_size(&dir, 3);
+        assert_eq!(dir_size(&dir), 3);
         dir.child("binary").assert(b"\x00\xFF\x80123" as &[u8]);
         dir.child("text").assert(b"\ndca\n\n" as &[u8]);
         dir.child("empty").assert(b"" as &[u8]);
@@ -499,7 +494,7 @@ mod tests {
         );
         decompress_from(&mut contents, &mut files(&dir), &LaxHandler).unwrap();
 
-        check_dir_size(&dir, 3);
+        assert_eq!(dir_size(&dir), 3);
         dir.child("foo").assert("123");
         dir.child("bad").assert(predicates::path::is_dir());
         dir.child("bar").assert("789");
@@ -543,13 +538,7 @@ mod tests {
         let mut files = VecFiles::default();
         decompress_from(&mut contents, &mut files, &std_errors()).unwrap();
 
-        let results = [("first", "123"), ("second", "hello")].iter();
-        // Explicit check because of zip
-        assert!(files.0.len() == 2);
-        assert!(files
-            .0
-            .iter()
-            .zip(results)
-            .all(|((l1, l2), (r1, r2))| l1 == r1 && l2 == r2));
+        let results = vec![("first", "123"), ("second", "hello")];
+        assert_eq_iters(files.0.iter().map(|(a, b)| (a.borrow(), b.borrow())), results.into_iter());
     }
 }

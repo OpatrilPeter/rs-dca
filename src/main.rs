@@ -7,11 +7,10 @@ use std::path::PathBuf;
 use std::process::exit;
 
 use dca::*;
-use entries::ListingSort;
 
 // CLI specific logic
 mod listing;
-use listing::list_files;
+use listing::{list_files, ListingSort};
 
 fn parse_args() -> clap::ArgMatches<'static> {
     use clap::*;

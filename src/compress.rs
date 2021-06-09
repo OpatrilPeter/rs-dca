@@ -251,6 +251,8 @@ mod tests {
     use std::ffi::OsStr;
     use std::io::BufReader;
 
+    use crate::testutils::*;
+
     fn std_errors() -> DefaultErrorHandler<'static> {
         DefaultErrorHandler::new(Path::new("test-archive.dca"))
     }
@@ -269,7 +271,7 @@ mod tests {
 
     #[test]
     fn test_single_file() {
-        let dir = TempDir::new().unwrap();
+        let dir = make_dir();
         dir.child("test").write_str("Hello world!").unwrap();
 
         let mut out = Vec::<u8>::new();
@@ -285,7 +287,7 @@ mod tests {
 
     #[test]
     fn test_many_files() {
-        let dir = TempDir::new().unwrap();
+        let dir = make_dir();
 
         dir.child("binary")
             .write_binary(b"\x00\xFF314\x10\x10")
@@ -322,7 +324,7 @@ mod tests {
 
     #[test]
     fn test_errors() {
-        let dir = TempDir::new().unwrap();
+        let dir = make_dir();
         {
             let mut out = Vec::<u8>::new();
             let bad = compress_into(
@@ -395,7 +397,7 @@ mod tests {
     #[test]
     /// We pass directory names instead
     fn test_invalid_name() {
-        let dir = TempDir::new().unwrap();
+        let dir = make_dir();
 
         let mut out = Vec::<u8>::new();
 
@@ -417,7 +419,7 @@ mod tests {
 
     #[test]
     fn test_file_handler() {
-        // For content just returns filenames
+        // For each entry just returns filenames
 
         struct Handler<I>(I);
         impl<'a, I: Iterator<Item = &'a &'static str>> FileHandler for Handler<I> {
