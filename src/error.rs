@@ -77,7 +77,7 @@ macro_rules! handled {
 }
 
 /// Errors concerning invalid filename for DCA entry
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 #[non_exhaustive]
 pub enum DcaFilenameError {
     /// Name not valid UTF-8
@@ -87,13 +87,18 @@ pub enum DcaFilenameError {
 }
 
 /// Convert OS-specific filename into DCA-compatible name
-pub fn dca_filename(name: &OsStr) -> Result<&str, DcaFilenameError> {
+pub fn into_dca_filename(name: &OsStr) -> Result<&str, DcaFilenameError> {
     use DcaFilenameError as O;
     let name = name.to_str().ok_or(O::NotUnicode)?;
-    if let Some(pos) = name.find(&['\n', '/'][..]) {
-        return Err(O::InvalidChar(name.chars().nth(pos).unwrap(), pos));
+    if let Some((pos, ch)) = name
+        .chars()
+        .enumerate()
+        .find(|(_, ch)| ['\n', '/'].contains(ch))
+    {
+        Err(O::InvalidChar(ch, pos))
+    } else {
+        Ok(name)
     }
-    Ok(name)
 }
 
 /// Lists various sections of DCA file format where problems during extraction could occur
@@ -104,4 +109,47 @@ pub enum DecompressionError {
     FileSize,
     Payload,
     Footer,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dca_filename() {
+        assert_eq!(into_dca_filename(OsStr::new("hello")).unwrap(), "hello");
+        assert_eq!(
+            into_dca_filename(OsStr::new("foo/bar")).unwrap_err(),
+            DcaFilenameError::InvalidChar('/', 3)
+        );
+        assert_eq!(
+            into_dca_filename(OsStr::new("a\n")).unwrap_err(),
+            DcaFilenameError::InvalidChar('\n', 1)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_dca_filename_nonunicode() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let invalid_unicode = b"ok\x80\x00\xFF";
+        assert_eq!(
+            into_dca_filename(OsStr::from_bytes(&invalid_unicode[..])).unwrap_err(),
+            DcaFilenameError::NotUnicode
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_dca_filename_nonunicode() {
+        use std::ffi::OsString;
+        use std::os::windows::prelude::*;
+
+        let invalid_unicode = ['o' as u16, 'k' as u16, 0xD800];
+        assert_eq!(
+            into_dca_filename(&OsString::from_wide(&invalid_unicode)).unwrap_err(),
+            DcaFilenameError::NotUnicode
+        );
+    }
 }

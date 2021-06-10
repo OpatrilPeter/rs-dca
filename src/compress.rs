@@ -4,7 +4,7 @@ use std::fs::{self, File};
 use std::io::{self, prelude::*};
 use std::path::Path;
 
-use crate::error::{dca_filename, error, ArchiveError, FilePosition, Handler as ErrorHandler};
+use crate::error::{into_dca_filename, error, ArchiveError, FilePosition, Handler as ErrorHandler};
 
 /// Error [`Handler`] that fails on every condition, logging each encountered problem
 pub struct DefaultErrorHandler<'a> {
@@ -163,7 +163,7 @@ pub fn compress_into(
             })?;
 
             let name =
-                dca_filename(fname).map_err(|e| E::InvalidDcaFilename(path.to_owned(), e))?;
+                into_dca_filename(fname).map_err(|e| E::InvalidDcaFilename(path.to_owned(), e))?;
 
             writer
                 .write_fmt(format_args!("{}\n{}\n", name, len))
