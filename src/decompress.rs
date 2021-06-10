@@ -6,7 +6,7 @@ use std::io::{self, prelude::*, BufRead, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use crate::error::{
-    error, warn, ArchiveError, DecompressionError, FilePosition, Handler as ErrorHandler,
+    error, warn, ArchiveError, DecompressionError, FilePosition, Handler as ErrorHandler, Result,
 };
 
 use ArchiveError as E;
@@ -17,10 +17,13 @@ pub struct DefaultErrorHandler<'a> {
 }
 
 impl<'a> DefaultErrorHandler<'a> {
+    /// Constructor. Provided `archive_name` is used for better error messages
     pub fn new(archive_name: &'a Path) -> Self {
         Self { archive_name }
     }
-    fn on_fatal(&self, err: &ArchiveError) {
+    /// Handler of errors that cause failure of the operation.
+    /// Also include errors that [`ErrorHandler`] deemed fatal.
+    pub fn on_fatal(&self, err: &ArchiveError) {
         match err {
             E::ArchiveIo(io_err) => {
                 error!(
@@ -45,7 +48,7 @@ impl<'a> DefaultErrorHandler<'a> {
 }
 
 impl<'a> ErrorHandler for DefaultErrorHandler<'a> {
-    fn on_err(&self, err: ArchiveError) -> Result<(), ArchiveError> {
+    fn on_err(&self, err: ArchiveError) -> Result<()> {
         match err {
             E::BadFileIo(fname, io_err) => {
                 error!(
@@ -84,8 +87,8 @@ fn read_line<T>(
     reader: &mut impl BufRead,
     line_buf: &mut String,
     position: &mut FilePosition,
-    processor: impl FnOnce(&str) -> Result<T, ArchiveError>,
-) -> Result<Option<T>, ArchiveError> {
+    processor: impl FnOnce(&str) -> Result<T>,
+) -> Result<Option<T>> {
     line_buf.truncate(0);
     reader.read_line(line_buf).map_err(E::ArchiveIo)?;
     if line_buf.is_empty() {
@@ -103,7 +106,7 @@ fn read_file_size(
     reader: &mut impl BufRead,
     line_buf: &mut String,
     position: &mut FilePosition,
-) -> Result<FilePosition, ArchiveError> {
+) -> Result<FilePosition> {
     let old_pos = *position;
     let handler = |s: &str| {
         s.parse::<FilePosition>().map_err(|_| E::CorruptedArchive {
@@ -131,7 +134,7 @@ fn extract_file(
     count: FilePosition,
     sink: &mut impl Write,
     sink_name: &Path,
-) -> Result<(), ArchiveError> {
+) -> Result<()> {
     // Implementation note: the casts between usize and FilePosition seem unifiable, but aren't
     // Buffer is usize(d), which in theoretical case may be much smaller than size of DCA entries
     let mut remaining_size = count;
@@ -172,7 +175,7 @@ pub trait FileHandler {
     ///
     /// Usage of `BadFileIo` indicates that further exctraction from archive is still possible.
     /// Note that final position in reader is irrelevant.
-    fn on_file<R: BufRead>(&mut self, file: FileDescriptor<'_, R>) -> Result<(), ArchiveError>;
+    fn on_file<R: BufRead>(&mut self, file: FileDescriptor<'_, R>) -> Result<()>;
 }
 
 /// Standard [`FileHandler`] implemented by extracting all files into given directory
@@ -180,16 +183,14 @@ pub struct DefaultFileHandler<'a> {
     work_directory: &'a Path,
 }
 impl<'a> DefaultFileHandler<'a> {
+    /// Constructor. `work_directory` is a place where archive's content should be extracted into
     pub fn new(work_directory: &'a Path) -> Self {
         Self { work_directory }
     }
 }
 
 impl<'a> FileHandler for DefaultFileHandler<'a> {
-    fn on_file<'b, R: BufRead>(
-        &'b mut self,
-        file: FileDescriptor<'b, R>,
-    ) -> Result<(), ArchiveError> {
+    fn on_file<'b, R: BufRead>(&'b mut self, file: FileDescriptor<'b, R>) -> Result<()> {
         let FileDescriptor {
             name: fname,
             reader,
@@ -220,13 +221,13 @@ impl<'a> FileHandler for DefaultFileHandler<'a> {
 /// Simple [`FileHandler`] that doesn't extract the file, just delegates it to underlying callable
 pub struct CallbackFileHandler<C>(pub C)
 where
-    C: FnMut(&str, FilePosition, &mut dyn BufRead) -> Result<(), ArchiveError>;
+    C: FnMut(&str, FilePosition, &mut dyn BufRead) -> Result<()>;
 
 impl<C> FileHandler for CallbackFileHandler<C>
 where
-    C: FnMut(&str, FilePosition, &mut dyn BufRead) -> Result<(), ArchiveError>,
+    C: FnMut(&str, FilePosition, &mut dyn BufRead) -> Result<()>,
 {
-    fn on_file<R: BufRead>(&mut self, file: FileDescriptor<'_, R>) -> Result<(), ArchiveError> {
+    fn on_file<R: BufRead>(&mut self, file: FileDescriptor<'_, R>) -> Result<()> {
         (self.0)(file.name, file.len, file.reader)
     }
 }
@@ -234,9 +235,9 @@ where
 // Note: simpler wrapper-less version of CallbackFileHandler that compiler rejects on use
 // impl<C> FileHandler for C
 // where
-//     C: FnMut(&str, FilePosition, &mut dyn BufRead) -> Result<(), ArchiveError>,
+//     C: FnMut(&str, FilePosition, &mut dyn BufRead) -> Result<()>,
 // {
-//     fn on_file<R: BufRead>(&mut self, file: FileDescriptor<'_, R>) -> Result<(), ArchiveError>
+//     fn on_file<R: BufRead>(&mut self, file: FileDescriptor<'_, R>) -> Result<()>
 //     {
 //         self(file.name, file.len, file.reader)
 //     }
@@ -253,7 +254,7 @@ pub fn decompress_from(
     reader: &mut (impl BufRead + Seek),
     handle_file: &mut impl FileHandler,
     handle_err: &impl ErrorHandler,
-) -> Result<(), ArchiveError> {
+) -> Result<()> {
     let mut position = reader.stream_position().map_err(E::ArchiveIo)?;
 
     // Header
@@ -351,7 +352,7 @@ pub fn decompress_from(
 pub fn decompress_files(
     archive_name: impl AsRef<Path>,
     work_directory: impl AsRef<Path>,
-) -> Result<(), ArchiveError> {
+) -> Result<()> {
     let archive_name = archive_name.as_ref();
     let work_directory = work_directory.as_ref();
 
@@ -478,7 +479,7 @@ mod tests {
 
         struct LaxHandler;
         impl ErrorHandler for LaxHandler {
-            fn on_err(&self, err: ArchiveError) -> Result<(), ArchiveError> {
+            fn on_err(&self, err: ArchiveError) -> Result<()> {
                 if let ArchiveError::BadFileIo(_, _) = err {
                     Ok(())
                 } else {
@@ -519,10 +520,7 @@ mod tests {
         #[derive(Default, Debug)]
         struct VecFiles(Vec<(String, String)>);
         impl FileHandler for VecFiles {
-            fn on_file<R: BufRead>(
-                &mut self,
-                file: FileDescriptor<'_, R>,
-            ) -> Result<(), ArchiveError> {
+            fn on_file<R: BufRead>(&mut self, file: FileDescriptor<'_, R>) -> Result<()> {
                 let mut buf = String::new();
                 file.reader.read_to_string(&mut buf).unwrap();
                 self.0.push((file.name.to_owned(), buf));
@@ -539,6 +537,9 @@ mod tests {
         decompress_from(&mut contents, &mut files, &std_errors()).unwrap();
 
         let results = vec![("first", "123"), ("second", "hello")];
-        assert_eq_iters(files.0.iter().map(|(a, b)| (a.borrow(), b.borrow())), results.into_iter());
+        assert_eq_iters(
+            files.0.iter().map(|(a, b)| (a.borrow(), b.borrow())),
+            results.into_iter(),
+        );
     }
 }

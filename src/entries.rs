@@ -3,13 +3,15 @@
 use std::io::{BufRead, Seek};
 
 use crate::decompress::{decompress_from, CallbackFileHandler};
-use crate::error::{ArchiveError, FilePosition, Handler as ErrorHandler};
+use crate::error::{FilePosition, Handler as ErrorHandler, Result};
 
 /// Extracts list of archive's entries as name-size pairs
+///
+/// See also CLI's method `list_files` for high-level usage.
 pub fn archive_entries(
     reader: &mut (impl BufRead + Seek),
     error_handler: &impl ErrorHandler,
-) -> Result<Vec<(String, FilePosition)>, ArchiveError> {
+) -> Result<Vec<(String, FilePosition)>> {
     let mut names = Vec::new();
 
     let mut fhandler = CallbackFileHandler(|name, len, _reader| {
@@ -46,4 +48,3 @@ mod tests {
         );
     }
 }
-

@@ -4,16 +4,21 @@ use std::fs::{self, File};
 use std::io::{self, prelude::*};
 use std::path::Path;
 
-use crate::error::{into_dca_filename, error, ArchiveError, FilePosition, Handler as ErrorHandler};
+use crate::error::{
+    error, into_dca_filename, ArchiveError, FilePosition, Handler as ErrorHandler, Result,
+};
 
-/// Error [`Handler`] that fails on every condition, logging each encountered problem
+/// [`ErrorHandler`] that fails on every condition, logging each encountered problem
 pub struct DefaultErrorHandler<'a> {
     archive_name: &'a Path,
 }
 impl<'a> DefaultErrorHandler<'a> {
+    /// Creates new instance. Provided archive name is used for reporting
     pub fn new(archive_name: &'a Path) -> Self {
         Self { archive_name }
     }
+    /// Handler of errors that cause failure of the operation.
+    /// Also include errors that [`ErrorHandler`] deemed fatal.
     pub fn on_fatal(&self, err: &ArchiveError) {
         use ArchiveError::*;
         match err {
@@ -30,8 +35,7 @@ impl<'a> DefaultErrorHandler<'a> {
                 );
             }
             InvalidDcaFilename(fname, load_err) => {
-                // TODO: precise error not pretty-printed
-                error!("File {:?} does not have a legal filename and cannot be added into the archive, due to following error: {:?}", fname, load_err);
+                error!("File {:?} does not have a legal filename and cannot be added into the archive, due to following error: {}", fname, load_err);
             }
             err => error!(
                 "Creation of archive {:?} failed due to error {:?}",
@@ -42,20 +46,26 @@ impl<'a> DefaultErrorHandler<'a> {
 }
 
 impl<'a> ErrorHandler for DefaultErrorHandler<'a> {
-    fn on_err(&self, err: ArchiveError) -> Result<(), ArchiveError> {
+    fn on_err(&self, err: ArchiveError) -> Result<()> {
         // All errors are fatal
         Err(err)
     }
 }
 
+/// Representation of contents and metadata of one file intended to be added into archive
 pub struct FileDescriptor<'a, R: BufRead> {
+    /// Path to file about to be added. Only filename is perserved in the archive
     pub path: &'a Path,
+    /// Reader that shall provide exactly [`Self::len`] bytes of data. [`std::io::Take`] adapter can be used
+    /// if the source cannot guarantee that
     pub reader: R,
+    /// Size of the file. Also represents how many bytes from reader should be available from the reader
     pub len: FilePosition,
 }
 
 /// Allows full customization of [`compress_into`] input file handling.
 pub trait FileHandler {
+    /// Type of reader passed into compression function
     type Reader: BufRead;
     /// Event-driven Iterator-like protocol.
     ///
@@ -64,16 +74,17 @@ pub trait FileHandler {
     ///
     /// Various possible results:
     ///
-    /// Ok(None) => No more file to add
-    /// Ok(Some(())) => File processed successfuly
-    /// Err(_) => [`ArchiveError`] - either from underlying callback or internally created [`io::Error`] promoted into [`ArchiveError::BadFileIo`]
-    fn add_file<Callback>(&mut self, compress: Callback) -> Result<Option<()>, ArchiveError>
+    /// - Ok(None) => No more file to add
+    /// - Ok(Some(())) => File processed successfuly
+    /// - Err(_) => [`ArchiveError`] - either from underlying callback or internally created [`io::Error`] promoted into [`ArchiveError::BadFileIo`]
+    fn add_file<Callback>(&mut self, compress: Callback) -> Result<Option<()>>
     where
-        Callback: FnOnce(FileDescriptor<'_, Self::Reader>) -> Result<(), ArchiveError>;
+        Callback: FnOnce(FileDescriptor<'_, Self::Reader>) -> Result<()>;
 }
 
 /// Handler for [`compress_into`], feeding it list of files.
-/// This class is responsible for opening and closing eachg
+///
+/// This class is responsible for whole file management (opening/closing).
 pub struct DefaultFileHandler<I>
 // where
 //     I: Iterator,
@@ -83,6 +94,7 @@ pub struct DefaultFileHandler<I>
     files: I,
 }
 impl<I> DefaultFileHandler<I> {
+    /// Constructor. Takes an iterable of paths or equivalent
     pub fn new<II>(files: II) -> Self
     where
         II: IntoIterator<IntoIter = I>,
@@ -101,9 +113,9 @@ where
     I::Item: AsRef<Path>,
 {
     type Reader = io::BufReader<fs::File>;
-    fn add_file<Callback>(&mut self, compress: Callback) -> Result<Option<()>, ArchiveError>
+    fn add_file<Callback>(&mut self, compress: Callback) -> Result<Option<()>>
     where
-        Callback: FnOnce(FileDescriptor<'_, Self::Reader>) -> Result<(), ArchiveError>,
+        Callback: FnOnce(FileDescriptor<'_, Self::Reader>) -> Result<()>,
     {
         use ArchiveError as E;
 
@@ -145,7 +157,7 @@ pub fn compress_into(
     writer: &mut impl Write,
     handle_file: &mut impl FileHandler,
     handle_err: &mut impl ErrorHandler,
-) -> Result<(), ArchiveError> {
+) -> Result<()> {
     use ArchiveError as E;
 
     writer.write_all(b"DCA\n").map_err(E::ArchiveIo)?;
@@ -158,9 +170,9 @@ pub fn compress_into(
             } = file;
 
             // Validate filename
-            let fname = path.file_name().ok_or_else(|| {
-                E::BadFileIo(path.to_owned(), io::Error::from(io::ErrorKind::NotFound))
-            })?;
+            let fname = path
+                .file_name()
+                .ok_or_else(|| E::BadFileIo(path.to_owned(), io::ErrorKind::NotFound.into()))?;
 
             let name =
                 into_dca_filename(fname).map_err(|e| E::InvalidDcaFilename(path.to_owned(), e))?;
@@ -169,15 +181,24 @@ pub fn compress_into(
                 .write_fmt(format_args!("{}\n{}\n", name, len))
                 .map_err(E::ArchiveIo)?;
 
+            let mut stored_len = 0;
             loop {
                 let buf = reader
                     .fill_buf()
                     .map_err(|e| E::BadFileIo(path.to_owned(), e))?;
-                if buf.is_empty() {
+                let new_len = buf.len();
+                if new_len == 0 {
+                    if stored_len as FilePosition != len {
+                        return Err(E::BadFileIo(
+                            path.to_owned(),
+                            io::ErrorKind::UnexpectedEof.into(),
+                        ));
+                    }
                     break;
                 }
-                let bytes = writer.write(buf).map_err(E::ArchiveIo)?;
-                reader.consume(bytes);
+                writer.write_all(buf).map_err(E::ArchiveIo)?;
+                stored_len += new_len;
+                reader.consume(new_len);
             }
             writer.write_all(b"\n").map_err(E::ArchiveIo)?;
             Ok(())
@@ -214,10 +235,7 @@ pub fn compress_into(
 /// compress_files(&["text.txt", "src.rs", "binary.blob"], "archive.dca")
 ///     .expect("failed to create the archive");
 /// ```
-pub fn compress_files<PathIter>(
-    files: PathIter,
-    archive_name: impl AsRef<Path>,
-) -> Result<(), ArchiveError>
+pub fn compress_files<PathIter>(files: PathIter, archive_name: impl AsRef<Path>) -> Result<()>
 where
     PathIter: IntoIterator,
     PathIter::Item: AsRef<Path>,
@@ -367,7 +385,7 @@ mod tests {
     fn test_err_handler() {
         struct CustHandler;
         impl ErrorHandler for CustHandler {
-            fn on_err(&self, err: ArchiveError) -> Result<(), ArchiveError> {
+            fn on_err(&self, err: ArchiveError) -> Result<()> {
                 match err {
                     ArchiveError::BadFileIo(path, io_err)
                         if path.file_name() == Some(OsStr::new("nonexistent"))
@@ -420,9 +438,9 @@ mod tests {
         struct Handler<I>(I);
         impl<'a, I: Iterator<Item = &'a &'static str>> FileHandler for Handler<I> {
             type Reader = std::io::BufReader<&'a [u8]>;
-            fn add_file<Callback>(&mut self, compress: Callback) -> Result<Option<()>, ArchiveError>
+            fn add_file<Callback>(&mut self, compress: Callback) -> Result<Option<()>>
             where
-                Callback: FnOnce(FileDescriptor<'_, Self::Reader>) -> Result<(), ArchiveError>,
+                Callback: FnOnce(FileDescriptor<'_, Self::Reader>) -> Result<()>,
             {
                 if let Some(s) = self.0.next() {
                     let reader = BufReader::new(s.as_bytes());

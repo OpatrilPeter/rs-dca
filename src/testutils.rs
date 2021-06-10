@@ -1,4 +1,4 @@
-/// Common helpers for unit tests
+//! Common helpers for unit tests
 
 use assert_fs::TempDir;
 use std::fmt::Debug;

@@ -13,6 +13,8 @@
 //! For additional information about the format and rationale, check
 //! project's README file.
 
+#![warn(missing_docs)]
+
 pub mod compress;
 pub mod decompress;
 pub mod entries;

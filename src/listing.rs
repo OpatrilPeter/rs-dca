@@ -1,10 +1,12 @@
+//! Implements archive listing CLI feature
+
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 
 use dca::decompress::DefaultErrorHandler;
 use dca::entries::archive_entries;
-use dca::error::{ArchiveError, FilePosition};
+use dca::error::{ArchiveError, FilePosition, Result};
 
 use humansize::{file_size_opts::CONVENTIONAL as FSIZE_STYLE, FileSize};
 
@@ -42,10 +44,18 @@ fn sort<Stringlike: Eq + Ord>(names: &mut Vec<(Stringlike, FilePosition)>, sorti
 ///
 /// Note that names of entries can be nonunique - as this was deemed a pathological case, sorting order of these
 /// entries was left undefined for efficiency
-pub fn list_files(
-    archive_name: impl AsRef<Path>,
-    sorting: ListingSort,
-) -> Result<(), ArchiveError> {
+///
+/// # Example
+/// ```no_run
+/// let _ = list_files("archive.dca", ListingSort::Size);
+/// ```
+/// Outputs the following (format may change)
+/// ```text
+/// file3 (130 B)
+/// file1 (50 B)
+/// file2 (5 B)
+/// ```
+pub fn list_files(archive_name: impl AsRef<Path>, sorting: ListingSort) -> Result<()> {
     let archive_name = archive_name.as_ref();
 
     let arch = File::open(archive_name).map_err(ArchiveError::ArchiveIo)?;
@@ -67,7 +77,8 @@ mod tests {
 
     #[test]
     fn test_sort() {
-        let data: Vec<(&'static str, FilePosition)> = vec![("world", 5), ("hello", 3), ("empty", 0)];
+        let data: Vec<(&'static str, FilePosition)> =
+            vec![("world", 5), ("hello", 3), ("empty", 0)];
 
         let mut a = data.clone();
         sort(&mut a, ListingSort::Unsorted);
@@ -79,6 +90,6 @@ mod tests {
 
         let mut a = data.clone();
         sort(&mut a, ListingSort::Size);
-        assert_eq!(a, vec![ ("world", 5), ("hello", 3), ("empty", 0)]);
+        assert_eq!(a, vec![("world", 5), ("hello", 3), ("empty", 0)]);
     }
 }

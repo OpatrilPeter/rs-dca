@@ -1,7 +1,6 @@
 #![cfg(feature = "cli")]
 
-#[allow(unused_imports)]
-use log::{debug, error, warn};
+use log::debug;
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display};
@@ -87,7 +86,7 @@ enum Mode {
     Listing,
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug, Default)]
 struct Options {
     mode: Option<Mode>,
     work_directory: Option<PathBuf>,

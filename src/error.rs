@@ -85,9 +85,20 @@ impl Error for ArchiveError {
     }
 }
 
+/// Error handler used for dealing with [`ArchiveError`] arising from compressing and decompressing
 pub trait Handler {
     /// Processing errors that may, but may not fail operation
-    fn on_err(&self, err: ArchiveError) -> Result<(), ArchiveError>;
+    ///
+    /// - if error is to be ignored, `Ok(())` is returned
+    /// - if error shall fail operation, passed error should be returned again,
+    ///   possibly transformed
+    ///
+    /// Note that implementation may know that some errors are unconditionally
+    /// fatal and don't call this method at all. As handlers are often written
+    /// with handling of fatal errors, be sure to either process and ignore
+    /// error or don't process and treat it as fatal - otherwise you're likely
+    /// to handle the same error twice
+    fn on_err(&self, err: ArchiveError) -> Result<()>;
 }
 
 /// Convenience control flow macro for [`Handler`] - situations where the operation
@@ -152,7 +163,10 @@ pub fn into_dca_filename(name: &OsStr) -> Result<&str, DcaFilenameError> {
 }
 
 /// Lists various sections of DCA file format where problems during extraction could occur
+///
+/// See DCA grammar (in project's README) for details
 #[derive(Debug)]
+#[allow(missing_docs)]
 pub enum DecompressionError {
     Header,
     FileName,
