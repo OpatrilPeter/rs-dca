@@ -3,7 +3,9 @@
 // For macro item export
 // #![allow(clippy::single_component_path_imports)]
 
+use std::error::Error;
 use std::ffi::OsStr;
+use std::fmt::{self, Display, Formatter};
 use std::io;
 use std::path::PathBuf;
 
@@ -30,21 +32,57 @@ pub(crate) use log::{error, warning as warn};
 /// Alias to the return type of [`std::io::Seek`] offset
 pub type FilePosition = u64;
 
+/// Central error type for (de)compressing DCA archives
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ArchiveError {
     /// Represents failed IO operation directly on the archive file
     ArchiveIo(io::Error),
-    /// When decompressing, structure violation was detected
+    /// When decompressing, structural violation was detected
     CorruptedArchive {
+        /// Byte offset in the archive
         position: FilePosition,
+        /// Logical name of the malformed section
         section: DecompressionError,
     },
     /// File within archive contents fails for I/O reasons - it can't be opened, read or written into
     BadFileIo(PathBuf, io::Error),
-    // BadFileIo(PathBuf, io::Error),
     /// Filename of archive contents doesn't conform to expected requirements
     InvalidDcaFilename(PathBuf, DcaFilenameError),
+}
+
+/// Standard conveniency alias
+pub type Result<T, E = ArchiveError> = std::result::Result<T, E>;
+
+impl Display for ArchiveError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), fmt::Error> {
+        use ArchiveError::*;
+        match self {
+            ArchiveIo(_) => write!(f, "failed to read/write archive contents"),
+            BadFileIo(path, _) => write!(f, "operation on archive entry {:?} failed", path),
+            CorruptedArchive { position, section } => write!(
+                f,
+                "invalid state detected while parsing archive's section {:?} at position {}",
+                section, position
+            ),
+            InvalidDcaFilename(path, problem) => write!(
+                f,
+                "filename entry {:?} doesn't match DCA naming requirements: {}",
+                path.file_name().unwrap_or_else(|| OsStr::new("\"\"")),
+                problem
+            ),
+        }
+    }
+}
+
+impl Error for ArchiveError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        use ArchiveError::*;
+        match self {
+            ArchiveIo(io_err) | BadFileIo(_, io_err) => Some(io_err),
+            _ => None,
+        }
+    }
 }
 
 pub trait Handler {
@@ -85,6 +123,18 @@ pub enum DcaFilenameError {
     /// Unsupported character detected at certain position
     InvalidChar(char, usize),
 }
+
+impl Display for DcaFilenameError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), fmt::Error> {
+        use DcaFilenameError::*;
+        match self {
+            NotUnicode => write!(f, "name is not valid UTF-8"),
+            InvalidChar(ch, pos) => write!(f, "unsupported character '{}' at position {}", ch, pos),
+        }
+    }
+}
+
+impl Error for DcaFilenameError {}
 
 /// Convert OS-specific filename into DCA-compatible name
 pub fn into_dca_filename(name: &OsStr) -> Result<&str, DcaFilenameError> {

@@ -2,7 +2,9 @@
 
 #[allow(unused_imports)]
 use log::{debug, error, warn};
+use std::error::Error;
 use std::ffi::{OsStr, OsString};
+use std::fmt::{self, Display};
 use std::path::PathBuf;
 use std::process::exit;
 
@@ -11,6 +13,25 @@ use dca::*;
 // CLI specific logic
 mod listing;
 use listing::{list_files, ListingSort};
+
+/// Helper for printing error chains
+struct ErrChain<'a>(&'a dyn Error);
+impl Display for ErrChain<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Display::fmt(self.0, f)?;
+        let mut s = self.0.source();
+        loop {
+            match s {
+                None => break,
+                Some(e) => {
+                    write!(f, ": {}", e)?;
+                    s = e.source();
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 fn parse_args() -> clap::ArgMatches<'static> {
     use clap::*;
@@ -173,10 +194,10 @@ fn main() {
             archive_name: Some(archive_name),
             ..
         } => {
-            if compress_files(&files, &archive_name).is_err() {
+            if let Err(err) = compress_files(&files, &archive_name) {
                 eprintln!(
-                    "Compression failed.\nArchive filename: {:?}\nArchive contents: {:?}",
-                    archive_name, files
+                    "Compression failed.\nArchive filename: {:?}\nArchive contents: {:?}\nProblem: {}",
+                    archive_name, files, ErrChain(&err)
                 );
                 exit(1);
             }
@@ -187,8 +208,12 @@ fn main() {
             work_directory: Some(work_directory),
             ..
         } => {
-            if decompress_files(&archive_name, &work_directory).is_err() {
-                eprintln!("Decompression of archive {:?} failed.", archive_name);
+            if let Err(err) = decompress_files(&archive_name, &work_directory) {
+                eprintln!(
+                    "Decompression of archive {:?} failed: {}",
+                    archive_name,
+                    ErrChain(&err)
+                );
                 exit(1);
             }
         }
@@ -197,8 +222,12 @@ fn main() {
             archive_name: Some(archive_name),
             ..
         } => {
-            if list_files(&archive_name, opts.sorting).is_err() {
-                eprintln!("Listing of archive {:?} failed.", archive_name);
+            if let Err(err) = list_files(&archive_name, opts.sorting) {
+                eprintln!(
+                    "Listing of archive {:?} failed: {}",
+                    archive_name,
+                    ErrChain(&err)
+                );
                 exit(1);
             }
         }
@@ -209,6 +238,13 @@ fn main() {
             );
             exit(1);
         }
-        opts => panic!("Unexpected argument combination {:?}.", opts),
+        opts => {
+            eprintln!(
+                "Unexpected argument combination {:?}.\n{}",
+                opts,
+                args.usage()
+            );
+            exit(1);
+        }
     }
 }
