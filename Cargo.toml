@@ -1,8 +1,15 @@
 [package]
 name = "dca"
 version = "1.0.0"
-authors = ["Peter Opatril <petr.opatril@firma.seznam.cz>"]
+authors = ["Peter Opatril"]
 edition = "2018"
+readme = "README.md"
+license = "MIT"
+license-file = "LICENCE.txt"
+keywords = ["archive", "cat", "tar"]
+categories = ["command-line-utilities", "encoding"]
+description = "Implementation of minimalistic format for combining files into one"
+repository = "https://github.com/OpatrilPeter/rs-dca/"
 
 [features]
 default = ["cli", "logging"]
