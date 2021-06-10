@@ -397,23 +397,19 @@ mod tests {
     #[test]
     /// We pass directory names instead
     fn test_invalid_name() {
-        let dir = make_dir();
-
         let mut out = Vec::<u8>::new();
 
-        let bad = compress_into(
-            &mut out,
-            &mut files(&[Path::new("/"), &dir.path().join("..")]),
-            &mut std_errors(),
-        )
-        .unwrap_err();
-        match bad {
-            ArchiveError::BadFileIo(path, io_err)
-                if path == Path::new("/") && io_err.kind() == io::ErrorKind::NotFound =>
-            {
-                ()
-            }
-            _ => panic!("Unexpected error {:?}", bad),
+        match compress_into(&mut out, &mut files(&[Path::new("/")]), &mut std_errors()).unwrap_err()
+        {
+            ArchiveError::BadFileIo(path, _) if path == Path::new("/") => (),
+            bad => panic!("Unexpected error {:?}", bad),
+        }
+
+        match compress_into(&mut out, &mut files(&[Path::new("..")]), &mut std_errors())
+            .unwrap_err()
+        {
+            ArchiveError::BadFileIo(path, _) if path == Path::new("..") => (),
+            bad => panic!("Unexpected error {:?}", bad),
         }
     }
 
