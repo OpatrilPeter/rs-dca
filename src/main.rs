@@ -1,23 +1,9 @@
-//! Dumb Cat Archive format compresser/decompresser
-//!
-//! Binary schema is super simple:
-//! Grammar:
-//! archive: header '\n' file*
-//! header: 'DCA\n'
-//! file: filename '\n' filesize '\n' payload '\n'
-//! filename: <utf8 encoded filename, must not contain / and \n>
-//! filesize: <decimal utf8 payload size in bytes>
-//! payload: <sequence of `filesize` bytes, original file content>
-
-#[allow(unused_imports)]
-use log::{debug, warn, error};
 use std::cmp::min;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::io::{self, prelude::*};
 use std::iter::FromIterator;
 use std::fs::File;
-use std::process::exit;
 
 fn parse_args() -> clap::ArgMatches<'static> {
     use clap::*;
@@ -60,11 +46,11 @@ struct Options {
     files: Vec<PathBuf>,
 }
 
-fn select_mode(args: &clap::ArgMatches<'_>) -> Options {
+fn select_mode(args: clap::ArgMatches<'_>) -> Options {
     let mut opts = Options::default();
 
     let output: Option<PathBuf> = args.value_of_os("output").map(|x| x.into());
-    opts.files = args.values_of_os("files").unwrap_or_default().map(|x| x.into()).collect();
+    opts.files = args.values_of_os("files").unwrap().map(|x| x.into()).collect();
 
     if args.is_present("compress") {
         opts.mode = Some(Mode::Compress);
@@ -74,28 +60,25 @@ fn select_mode(args: &clap::ArgMatches<'_>) -> Options {
     }
     // Auto detection
     else {
-        #[allow(clippy::collapsible_else_if)]
         if opts.files.len() == 1 && opts.files[0].extension().map(|ext| ext == OsStr::new("dca")).unwrap_or(false) {
             opts.mode = Some(Mode::Decompress);
-        }
-        else {
-            opts.mode = Some(Mode::Compress);
         }
     }
 
     match opts.mode {
         Some(Mode::Compress) => {
-            opts.archive_name = output;
             match opts.archive_name {
                 None => {
                     opts.archive_name = Some({
                         if opts.files.len() == 1 {
-                            let mut buf = OsString::new();
-                            if let Some(file_name) = opts.files[0].file_name() {
-                                buf.push(file_name);
+                            let mut a = opts.files[0].clone();
+                            if let Some(ext) = a.extension() {
+                                // Redundant copy?
+                                let ext = ext.to_owned();
+                                a.push(ext);
                             }
-                            buf.push(".dca");
-                            PathBuf::from(buf)
+                            a.set_extension("dca");
+                            a
                         }
                         else {
                             PathBuf::from("dca.dca")
@@ -108,6 +91,8 @@ fn select_mode(args: &clap::ArgMatches<'_>) -> Options {
                     }
                 }
             }
+            opts.archive_name = output;
+            opts
         },
         Some(Mode::Decompress) => {
             if opts.files.len() != 1 {
@@ -117,10 +102,15 @@ fn select_mode(args: &clap::ArgMatches<'_>) -> Options {
 
             opts.work_directory = output.or_else(||Some(PathBuf::from(".")));
             opts.archive_name = std::mem::take(&mut opts.files).into_iter().next();
+
+
+            opts
         },
-        None => ()
+        None => {
+            // TODO: warn about unknown args
+            opts
+        }
     }
-    opts
 }
 
 fn ok_fname(name: &OsStr) -> Option<&str> {
@@ -133,9 +123,8 @@ fn ok_fname(name: &OsStr) -> Option<&str> {
     utf_name
 }
 
-// TODO: Iterator<&Path> is optimal type for files but Vec isn't covariant
-fn compress_files(files: &[PathBuf], archive_name: &Path) -> Result<(), io::Error> {
-    let arch = File::create(archive_name)?; // TODO: Remove file on error
+fn compress_files(files: Vec<PathBuf>, archive_name: &Path) -> Result<(), io::Error> {
+    let arch = File::create(archive_name)?;
     let mut writer = io::BufWriter::new(arch);
 
     writer.write_all(b"DCA\n")?;
@@ -150,7 +139,7 @@ fn compress_files(files: &[PathBuf], archive_name: &Path) -> Result<(), io::Erro
                 match ok_fname(fname) {
                     Some(fname) => fname,
                     None => {
-                        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("argument {:?} to be compressed is not accepted name", file)));
+                        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("argument {:?} to be compressed is accepted name", file)));
                     }
                 }
             }
@@ -208,7 +197,7 @@ fn decompress_files(archive_name: &Path, work_directory: &Path) -> Result<(), io
         };
 
         let fname_buf = PathBuf::from_iter(&[work_directory, Path::new(&fname)]);
-        let file = File::create(fname_buf)?; // TODO: Remove files on error
+        let file = File::create(fname_buf)?;
         let mut writer = io::BufWriter::new(file);
 
         let mut remaining_size = fsize;
@@ -224,7 +213,7 @@ fn decompress_files(archive_name: &Path, work_directory: &Path) -> Result<(), io
                 }
                 break;
             }
-            writer.write_all(&buf[..read_upto])?;
+            writer.write_all(buf)?;
             reader.consume(read_upto);
             remaining_size -= read_upto;
         }
@@ -242,30 +231,13 @@ fn decompress_files(archive_name: &Path, work_directory: &Path) -> Result<(), io
 }
 
 fn main() {
-    env_logger::init();
     let args = parse_args();
 
-    let opts = select_mode(&args);
-    debug!("Collected options: {:?}", opts);
-    match opts {
+    match select_mode(args) {
         Options{mode: Some(Mode::Compress), files, archive_name: Some(archive_name), ..}
-            => {
-                if let Err(e) = compress_files(&files, &archive_name) {
-                    eprintln!("Compression failed with following error: {}\nArchive filename: {:?}\nArchive contents: {:?}", e, archive_name, files);
-                    exit(1);
-                }
-            }
+            => compress_files(files, &archive_name).unwrap(),
         Options{mode: Some(Mode::Decompress), archive_name: Some(archive_name), work_directory: Some(work_directory), ..}
-            => {
-                if let Err(e) = decompress_files(&archive_name, &work_directory) {
-                    eprintln!("Decompression of archive {:?} failed with following error: {}", archive_name, e);
-                    exit(1);
-                }
-            }
-        Options{mode: None, ..} => {
-            eprintln!("No valid mode selected, please select compression/decompression.\n{}", args.usage());
-            exit(1);
-        }
+            => decompress_files(&archive_name, &work_directory).unwrap(),
         opts => panic!("Unexpected argument combination {:?}.", opts),
     }
 }
